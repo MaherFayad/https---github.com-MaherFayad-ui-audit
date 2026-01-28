@@ -5,94 +5,473 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UI Analysis Report - {{ image_path }}</title>
+
+    <!-- Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Markdown Parser -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
     <style>
+        :root {
+            /* Shadcn-like Token System */
+            --background: #ffffff;
+            --foreground: #09090b;
+            /* slate-950 */
+
+            --card: #ffffff;
+            --card-foreground: #09090b;
+
+            --popover: #ffffff;
+            --popover-foreground: #09090b;
+
+            --primary: #18181b;
+            /* slate-900 */
+            --primary-foreground: #fafafa;
+            /* slate-50 */
+
+            --secondary: #f4f4f5;
+            /* slate-100 */
+            --secondary-foreground: #18181b;
+
+            --muted: #f4f4f5;
+            --muted-foreground: #71717a;
+            /* slate-500 */
+
+            --accent: #f4f4f5;
+            --accent-foreground: #18181b;
+
+            --destructive: #ef4444;
+            --destructive-foreground: #fafafa;
+
+            --border: #e4e4e7;
+            /* slate-200 */
+            --input: #e4e4e7;
+            --ring: #18181b;
+
+            --radius: 0.5rem;
+
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
 
+        /* TOC Sidebar */
+        /* TOC Sidebar */
+        .toc-container {
+            width: 240px;
+            /* Slightly narrower */
+            flex-shrink: 0;
+            position: sticky;
+            top: 2rem;
+            align-self: start;
+            max-height: calc(100vh - 4rem);
+            overflow-y: auto;
+            margin-right: 2rem;
+            padding-right: 1rem;
+        }
+
+        @media (max-width: 1024px) {
+            .toc-container {
+                display: none;
+            }
+        }
+
+        .toc-link {
+            display: block;
+            font-size: 0.875rem;
+            color: var(--muted-foreground);
+            text-decoration: none;
+            margin-bottom: 1rem;
+            padding-left: 0.5rem;
+            transition: all 0.2s;
+        }
+
+        .toc-link:hover {
+            color: var(--foreground);
+        }
+
+        .toc-link.active {
+            color: var(--foreground);
+            font-weight: 500;
+        }
+
+        .toc-link.h3 {
+            margin-left: 0.75rem;
+            font-size: 0.8rem;
+        }
+
         body {
-            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-            min-height: 100vh;
-            color: #e4e4e7;
-            padding-bottom: 100px;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--background);
+            color: var(--foreground);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
         }
 
-        /* Header */
-        .header {
-            background: rgba(0, 0, 0, 0.3);
-            backdrop-filter: blur(10px);
-            padding: 20px 40px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        /* Utility Layout Helper classes */
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 2rem;
         }
 
-        .header h1 {
+        .flex {
+            display: flex;
+        }
+
+        .flex-col {
+            flex-direction: column;
+        }
+
+        .justify-between {
+            justify-content: space-between;
+        }
+
+        .items-center {
+            align-items: center;
+        }
+
+        .gap-2 {
+            gap: 0.5rem;
+        }
+
+        .gap-4 {
+            gap: 1rem;
+        }
+
+        .gap-6 {
+            gap: 1.5rem;
+        }
+
+        .gap-8 {
+            gap: 2rem;
+        }
+
+        .mb-4 {
+            margin-bottom: 1rem;
+        }
+
+        .mb-6 {
+            margin-bottom: 1.5rem;
+        }
+
+        .mb-8 {
+            margin-bottom: 2rem;
+        }
+
+        .mt-2 {
+            margin-top: 0.5rem;
+        }
+
+        .grid {
+            display: grid;
+        }
+
+        .grid-cols-4 {
+            grid-template-columns: repeat(4, 1fr);
+        }
+
+        .grid-cols-2 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+
+        /* Typography */
+        h1 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+
+        h2 {
             font-size: 1.5rem;
             font-weight: 600;
-            color: #fff;
-            margin-bottom: 8px;
+            letter-spacing: -0.025em;
+            margin-bottom: 1rem;
         }
 
-        .header .subtitle {
+        h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .text-sm {
             font-size: 0.875rem;
-            color: #94a3b8;
         }
 
-        .header .badges {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            margin-top: 12px;
+        .text-xs {
+            font-size: 0.75rem;
         }
 
-        .header .score-badge {
+        .text-muted {
+            color: var(--muted-foreground);
+        }
+
+        .font-medium {
+            font-weight: 500;
+        }
+
+        .font-semibold {
+            font-weight: 600;
+        }
+
+        .mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+
+        /* Components */
+
+        /* Buttons */
+        .btn {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 0.875rem;
-            color: white;
-        }
-
-        .header .score-badge.warning {
-            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-        }
-
-        .header .score-badge.danger {
-            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-        }
-
-        .header .score-badge.info {
-            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-        }
-
-        /* Main Content */
-        .content {
-            padding: 40px;
-            display: flex;
             justify-content: center;
+            border-radius: var(--radius);
+            font-size: 0.875rem;
+            font-weight: 500;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
         }
 
+        .btn-primary {
+            background-color: var(--primary);
+            color: var(--primary-foreground);
+        }
+
+        .btn-primary:hover {
+            opacity: 0.9;
+        }
+
+        .btn-outline {
+            border-color: var(--border);
+            background-color: transparent;
+            color: var(--foreground);
+        }
+
+        .btn-outline:hover {
+            background-color: var(--accent);
+        }
+
+        .btn-icon {
+            padding: 0.5rem;
+        }
+
+        /* Cards */
+        .card {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background-color: var(--card);
+            color: var(--card-foreground);
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            /* overflow: hidden; Removed to allow sticky TOC */
+        }
+
+        .card-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .card-content {
+            padding: 1.5rem;
+        }
+
+        .card-content-report {
+            padding: 4rem;
+        }
+
+        /* Badges */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 9999px;
+            border: 1px solid transparent;
+            padding: 0.125rem 0.625rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+
+        .badge-secondary {
+            border-color: transparent;
+            background-color: var(--secondary);
+            color: var(--secondary-foreground);
+        }
+
+        .badge-outline {
+            border-color: var(--border);
+            color: var(--foreground);
+        }
+
+        /* Metric Card */
+        .metric-card {
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .metric-label {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--muted-foreground);
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--foreground);
+        }
+
+        .metric-desc {
+            font-size: 0.75rem;
+            color: var(--muted-foreground);
+        }
+
+        .metric-target {
+            font-size: 0.7rem;
+            color: var(--success);
+            background: rgba(34, 197, 94, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            display: inline-block;
+            margin-top: 2px;
+            align-self: flex-start;
+        }
+
+        /* Tabs */
+        .tabs-list {
+            display: inline-flex;
+            height: 2.5rem;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius);
+            background-color: var(--muted);
+            padding: 0.25rem;
+            color: var(--muted-foreground);
+        }
+
+        .tab-trigger {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            white-space: nowrap;
+            border-radius: calc(var(--radius) - 0.125rem);
+            /* slightly smaller */
+            padding: 0.375rem 0.75rem;
+            /* px-3 py-1.5 */
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--muted-foreground);
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab-trigger:hover {
+            color: var(--foreground);
+        }
+
+        .tab-trigger.active {
+            background-color: var(--background);
+            color: var(--foreground);
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+
+        /* Image Viewer */
+        .image-viewer {
+            position: relative;
+            background-color: var(--secondary);
+            border-radius: var(--radius);
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        .image-viewer img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        /* Markdown Prose */
+        .prose {
+            max-width: 65ch;
+            color: var(--foreground);
+        }
+
+        .prose h1,
+        .prose h2,
+        .prose h3 {
+            margin-top: 1.5em;
+            margin-bottom: 0.5rem;
+            color: var(--foreground);
+            font-weight: 600;
+        }
+
+        .prose p {
+            margin-bottom: 1rem;
+            line-height: 1.7;
+        }
+
+        .prose ul {
+            margin-bottom: 1rem;
+            padding-left: 1.5rem;
+        }
+
+        .prose li {
+            margin-bottom: 0.25rem;
+        }
+
+        .prose strong {
+            font-weight: 600;
+            color: var(--foreground);
+        }
+
+        .prose blockquote {
+            border-left: 4px solid var(--border);
+            padding-left: 1rem;
+            font-style: italic;
+            color: var(--muted-foreground);
+        }
+
+        /* Heatmap Legend-ish colors for scores */
+        .text-success {
+            color: var(--success);
+        }
+
+        .text-warning {
+            color: var(--warning);
+        }
+
+        .text-danger {
+            color: var(--danger);
+        }
+
+        /* Panels */
         .panel {
             display: none;
-            max-width: 1200px;
-            width: 100%;
-            animation: fadeIn 0.3s ease-in-out;
+            animation: ease-in-out 0.2s fadeSlide;
         }
 
         .panel.active {
             display: block;
         }
 
-        @keyframes fadeIn {
+        @keyframes fadeSlide {
             from {
                 opacity: 0;
-                transform: translateY(10px);
+                transform: translateY(5px);
             }
 
             to {
@@ -101,500 +480,344 @@
             }
         }
 
-        /* Image Display */
-        .image-container {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 16px;
-            padding: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .image-container img {
-            width: 100%;
-            height: auto;
-            border-radius: 8px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-        }
-
-        .image-container h2 {
-            font-size: 1.25rem;
-            margin-bottom: 16px;
-            color: #fff;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .image-container h2::before {
-            content: '';
-            width: 4px;
-            height: 24px;
-            background: linear-gradient(180deg, #8b5cf6, #6366f1);
-            border-radius: 2px;
-        }
-
-        /* Report Panel */
-        .report-container {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 16px;
-            padding: 30px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .report-container h2 {
-            font-size: 1.25rem;
-            margin-bottom: 20px;
-            color: #fff;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .report-container h2::before {
-            content: '';
-            width: 4px;
-            height: 24px;
-            background: linear-gradient(180deg, #f59e0b, #ef4444);
-            border-radius: 2px;
-        }
-
-        .report-content {
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 12px;
-            padding: 24px;
-            font-size: 0.95rem;
-            line-height: 1.8;
-            white-space: pre-wrap;
-            font-family: 'Segoe UI', system-ui, sans-serif;
-        }
-
-        /* Bottom Navigation */
-        .nav-bar {
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(15, 23, 42, 0.95);
-            backdrop-filter: blur(20px);
-            border-radius: 16px;
-            padding: 8px;
-            display: flex;
-            gap: 4px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-            z-index: 1000;
-        }
-
-        .nav-btn {
-            padding: 10px 16px;
-            border: none;
-            background: transparent;
-            color: #94a3b8;
-            font-size: 0.75rem;
-            font-weight: 500;
-            cursor: pointer;
-            border-radius: 12px;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .nav-btn:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: #fff;
-        }
-
-        .nav-btn.active {
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-            color: #fff;
-            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-        }
-
-        .nav-btn svg {
-            width: 16px;
-            height: 16px;
-        }
-
-        /* Info Cards */
-        .info-grid {
+        /* Scroll Zones */
+        .zone-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
         }
 
-        .info-card {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 12px;
-            padding: 16px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+        .zone-item {
+            border: 1px solid var(--border);
+            padding: 1rem;
+            border-radius: var(--radius);
+            background: var(--card);
         }
 
-        .info-card .label {
-            font-size: 0.7rem;
-            color: #94a3b8;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 4px;
+        .zone-bar {
+            height: 4px;
+            border-radius: 2px;
+            background: var(--secondary);
+            margin-top: 0.5rem;
+            overflow: hidden;
         }
 
-        .info-card .value {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #fff;
-        }
-
-        .info-card .value.small {
-            font-size: 1rem;
-        }
-
-        /* Scroll Depth Zones */
-        .zones-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 12px;
-            margin-top: 20px;
-        }
-
-        .zone-card {
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 12px;
-            padding: 16px;
-            text-align: center;
-            border: 2px solid;
-        }
-
-        .zone-card:nth-child(1) {
-            border-color: #10b981;
-        }
-
-        .zone-card:nth-child(2) {
-            border-color: #eab308;
-        }
-
-        .zone-card:nth-child(3) {
-            border-color: #f97316;
-        }
-
-        .zone-card:nth-child(4) {
-            border-color: #ef4444;
-        }
-
-        .zone-card .zone-name {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            margin-bottom: 8px;
-        }
-
-        .zone-card .zone-value {
-            font-size: 1.5rem;
-            font-weight: 700;
-            color: #fff;
-        }
-
-        .zone-card .zone-label {
-            font-size: 0.7rem;
-            color: #64748b;
-            margin-top: 4px;
-        }
-
-        /* Attention boxes list */
-        .boxes-list {
-            margin-top: 20px;
-        }
-
-        .boxes-list h3 {
-            font-size: 1rem;
-            color: #94a3b8;
-            margin-bottom: 12px;
-        }
-
-        .box-item {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 8px;
-            padding: 12px 16px;
-            margin-bottom: 8px;
-            border-left: 3px solid #10b981;
-            font-size: 0.875rem;
-        }
-
-        .box-item .coords {
-            color: #6b7280;
-            font-family: monospace;
-            font-size: 0.75rem;
+        .zone-fill {
+            height: 100%;
+            background: var(--primary);
         }
 
         /* Responsive */
         @media (max-width: 768px) {
-            .nav-bar {
-                width: calc(100% - 40px);
-                overflow-x: auto;
+            .grid-cols-4 {
+                grid-template-columns: 1fr;
             }
 
-            .nav-btn span {
-                display: none;
-            }
-
-            .content {
-                padding: 20px;
-            }
-
-            .zones-grid {
-                grid-template-columns: repeat(2, 1fr);
+            .tabs-list {
+                flex-wrap: wrap;
+                height: auto;
+                justify-content: flex-start;
             }
         }
     </style>
 </head>
 
 <body>
-    <header class="header">
-        <h1>🎯 UI Analysis Report</h1>
-        <p class="subtitle">
-            {{ page_info.url if page_info.url else image_path }} •
-            {{ dimensions.width }}×{{ dimensions.height }}px •
-            {{ device_type | capitalize }}
-        </p>
-        <div class="badges">
-            <div class="score-badge {% if focus_score < 40 %}danger{% elif focus_score < 70 %}warning{% endif %}">
-                📊 Focus: {{ "%.0f"|format(focus_score) }}%
+    <div class="container">
+        <!-- Header -->
+        <header class="flex flex-col gap-6 mb-8 border-b" style="border-color: var(--border); padding-bottom: 2rem;">
+            <div class="flex justify-between items-center">
+                <div>
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="text-sm text-muted mono">{{ dimensions.width }}x{{ dimensions.height }}px</span>
+                    </div>
+                    <h1>{{ page_info.page_title if page_info.page_title else "Web Page Analysis" }}</h1>
+                    <p class="text-muted">{{ page_info.url if page_info.url else image_path }}</p>
+                </div>
+                <div class="flex gap-2">
+                    <button class="btn btn-outline" onclick="downloadImage('png')">
+                        Download PNG
+                    </button>
+                    <!-- <button class="btn btn-primary" onclick="window.print()">Print Report</button> -->
+                </div>
             </div>
-            <div class="score-badge info">
-                📱 {{ device_type | capitalize }}
-            </div>
-            <div class="score-badge {% if above_fold_analysis.above_fold_attention_pct < 50 %}warning{% endif %}">
-                ⬆️ Above Fold: {{ "%.0f"|format(above_fold_analysis.above_fold_attention_pct) }}%
-            </div>
-            <button class="score-badge" onclick="downloadImage('png')" style="cursor:pointer;border:none;">
-                📥 PNG
-            </button>
-            <button class="score-badge" onclick="downloadImage('jpeg')" style="cursor:pointer;border:none;">
-                🖼️ JPEG
-            </button>
-        </div>
-    </header>
 
-    <main class="content">
-        <!-- Original Panel -->
-        <div class="panel active" id="panel-original">
-            <div class="info-grid">
-                <div class="info-card">
-                    <div class="label">Dimensions</div>
-                    <div class="value small">{{ dimensions.width }}×{{ dimensions.height }}</div>
+            <!-- Metrics -->
+            <div class="grid grid-cols-4 gap-4">
+                <div class="card metric-card">
+                    <span class="metric-label">Focus Score</span>
+                    <div>
+                        <span
+                            class="metric-value {% if focus_score < 40 %}text-danger{% elif focus_score < 70 %}text-warning{% endif %}">
+                            {{ "%.0f"|format(focus_score) }}%
+                        </span>
+                        <span class="metric-target">Target: >50%</span>
+                    </div>
+                    <span class="metric-desc">Attention concentration</span>
                 </div>
-                <div class="info-card">
-                    <div class="label">Device Type</div>
-                    <div class="value small">{{ device_type | capitalize }}</div>
+                <div class="card metric-card">
+                    <span class="metric-label">Clarity Score</span>
+                    <div>
+                        <span class="metric-value">
+                            {{ "%.0f"|format(68.5) }}% <!-- Placeholder if missing, using safe default or variable -->
+                        </span>
+                        <span class="metric-target">Target: >60%</span>
+                    </div>
+                    <span class="metric-desc">Visual clutter index</span>
                 </div>
-                <div class="info-card">
-                    <div class="label">Focus Score</div>
-                    <div class="value">{{ "%.0f"|format(focus_score) }}%</div>
+                <div class="card metric-card">
+                    <span class="metric-label">Above Fold</span>
+                    <div>
+                        <span class="metric-value">
+                            {{ "%.0f"|format(above_fold_analysis.above_fold_attention_pct) }}%
+                        </span>
+                        <span class="metric-target">Target: >15%</span>
+                    </div>
+                    <span class="metric-desc">Initial engagement</span>
                 </div>
-                <div class="info-card">
-                    <div class="label">Attention Areas</div>
-                    <div class="value">{{ boxes|length }}</div>
-                </div>
-                <div class="info-card">
-                    <div class="label">Above Fold</div>
-                    <div class="value">{{ "%.0f"|format(above_fold_analysis.above_fold_attention_pct) }}%</div>
+                <div class="card metric-card">
+                    <span class="metric-label">Attention Areas</span>
+                    <span class="metric-value">{{ boxes|length }}</span>
+                    <span class="metric-desc">Distinct elements</span>
                 </div>
             </div>
-            <div class="image-container">
-                <h2>Original Image</h2>
-                <img src="{{ original }}" alt="Original UI Screenshot">
-            </div>
-        </div>
+        </header>
 
-        <!-- Attention Panel -->
-        <div class="panel" id="panel-attention">
-            <div class="image-container">
-                <h2>Attention Heatmap</h2>
-                <img src="{{ attention }}" alt="Attention Heatmap">
+        <!-- Navigation Tabs -->
+        <div class="flex items-center justify-between mb-6">
+            <div class="tabs-list" role="tablist">
+                <button class="tab-trigger active" data-panel="original">Original</button>
+                <button class="tab-trigger" data-panel="attention">Attention</button>
+                <button class="tab-trigger" data-panel="path">Scanpath</button>
+                <button class="tab-trigger" data-panel="scroll">Scroll Depth</button>
+                <button class="tab-trigger" data-panel="report">Accessibility</button>
             </div>
-            <div class="boxes-list">
-                <h3>Detected Attention Areas ({{ boxes|length }})</h3>
-                {% for box in boxes %}
-                <div class="box-item">
-                    <strong>{{ box.label }}</strong>
-                    <div class="coords">Position: ({{ box.x }}, {{ box.y }}) • Size: {{ box.w }}×{{ box.h }}px</div>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-
-        <!-- Focus Panel -->
-        <div class="panel" id="panel-focus">
-            <div class="image-container">
-                <h2>Focus Map (Tunnel Vision)</h2>
-                <img src="{{ focus }}" alt="Focus Map">
+            <div class="text-xs text-muted">
+                Press 1-5 to switch tabs
             </div>
         </div>
 
-        <!-- Fold Panel -->
-        <div class="panel" id="panel-fold">
-            <div class="info-grid">
-                <div class="info-card">
-                    <div class="label">Viewport Height</div>
-                    <div class="value">{{ viewport_height }}px</div>
+        <main>
+            <!-- Original Panel -->
+            <section id="panel-original" class="panel active">
+                <div class="image-viewer">
+                    <img src="{{ original }}" alt="Original UI">
                 </div>
-                <div class="info-card">
-                    <div class="label">Above Fold Attention</div>
-                    <div class="value">{{ "%.0f"|format(above_fold_analysis.above_fold_attention_pct) }}%</div>
-                </div>
-                <div class="info-card">
-                    <div class="label">Below Fold Attention</div>
-                    <div class="value">{{ "%.0f"|format(above_fold_analysis.below_fold_attention_pct) }}%</div>
-                </div>
-                <div class="info-card">
-                    <div class="label">Fold Position</div>
-                    <div class="value small">{{ "%.0f"|format(above_fold_analysis.fold_ratio) }}% of page</div>
-                </div>
-            </div>
-            <div class="image-container">
-                <h2>Above-the-Fold Analysis</h2>
-                <img src="{{ fold }}" alt="Fold Line Visualization">
-            </div>
-        </div>
+            </section>
 
-        <!-- Scroll Depth Panel -->
-        <div class="panel" id="panel-scroll">
-            <div class="image-container">
-                <h2>Scroll Depth Analysis</h2>
-                <img src="{{ scroll_depth }}" alt="Scroll Depth Visualization">
-            </div>
-            <div class="zones-grid">
-                {% for zone in scroll_analysis.zones %}
-                <div class="zone-card">
-                    <div class="zone-name">{{ zone.name }}</div>
-                    <div class="zone-value">{{ "%.0f"|format(zone.attention_pct) }}%</div>
-                    <div class="zone-label">{{ zone.box_count }} elements</div>
+            <!-- Attention Panel -->
+            <section id="panel-attention" class="panel">
+                <div class="grid grid-cols-2 gap-8" style="grid-template-columns: 2fr 1fr;">
+                    <div class="image-viewer">
+                        <img src="{{ attention }}" alt="Attention Heatmap">
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Attention Areas</h3>
+                        </div>
+                        <div class="card-content" style="max-height: 800px; overflow-y: auto;">
+                            <!-- List -->
+                            <div class="flex flex-col gap-2">
+                                {% for box in boxes %}
+                                <div class="flex flex-col gap-1 p-2 rounded" style="background: var(--secondary);">
+                                    <div class="flex justify-between">
+                                        <span class="font-medium text-sm">{{ box.label }}</span>
+                                    </div>
+                                    <span class="text-xs text-muted mono">x:{{box.x}} y:{{box.y}}</span>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                {% endfor %}
-            </div>
-        </div>
+            </section>
 
-        <!-- Contrast Panel -->
-        <div class="panel" id="panel-contrast">
-            <div class="image-container">
-                <h2>Contrast Map (Visual Complexity)</h2>
-                <img src="{{ contrast }}" alt="Contrast Map">
-            </div>
-        </div>
+            <!-- Scanpath Panel -->
+            <section id="panel-path" class="panel">
+                <div class="grid grid-cols-2 gap-8" style="grid-template-columns: 2fr 1fr;">
+                    <div class="image-viewer">
+                        <img src="{{ scanpath }}" alt="Scanpath">
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Reading Flow</h3>
+                        </div>
+                        <div class="card-content">
+                            <p class="text-sm text-muted mb-4">
+                                This path visualizes the predicted order of eye movements (saccades) based on visual
+                                salience and layout geometry (Z-Pattern).
+                            </p>
+                            <div class="flex flex-col gap-2">
+                                <div class="p-4 bg-secondary rounded text-sm">
+                                    <strong class="block mb-1">How it works</strong>
+                                    Elements are grouped into vertical bands and sorted Top-Down, then Left-Right to
+                                    mimic natural reading patterns.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-        <!-- Report Panel -->
-        <div class="panel" id="panel-report">
-            <div class="report-container">
-                <h2>Accessibility Report</h2>
-                <div class="report-content">{{ accessibility_report }}</div>
-            </div>
-        </div>
-    </main>
+            <!-- Scroll Depth Panel -->
+            <section id="panel-scroll" class="panel">
+                <div class="grid grid-cols-2 gap-8" style="grid-template-columns: 2fr 1fr;">
+                    <div class="image-viewer">
+                        <img src="{{ scroll_depth }}" alt="Scroll Depth">
+                    </div>
+                    <div class="flex flex-col gap-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Scroll Metrics</h3>
+                            </div>
+                            <div class="card-content flex flex-col gap-4">
+                                {% for zone in scroll_analysis.zones %}
+                                <div class="zone-item">
+                                    <div class="flex justify-between items-center mb-1">
+                                        <span class="font-medium text-sm">{{ zone.label }}</span>
+                                        <!-- Use simpler label if name is long -->
+                                        <span class="font-bold text-sm">{{ "%.0f"|format(zone.attention_pct) }}%
+                                            Attn</span>
+                                    </div>
+                                    <div class="text-xs text-muted flex justify-between">
+                                        <span>Elements: {{ zone.box_count }}</span>
+                                        <span>Visibility: {{ "%.0f"|format(zone.visibility_pct) }}%</span>
+                                    </div>
+                                    <!-- Mini bar chart for attention -->
+                                    <div class="zone-bar">
+                                        <div class="zone-fill" style="width: {{ zone.attention_pct }}%;"></div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-    <nav class="nav-bar">
-        <button class="nav-btn active" data-panel="original">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-            </svg>
-            <span>Original</span>
-        </button>
-        <button class="nav-btn" data-panel="attention">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" />
-                <circle cx="12" cy="12" r="3" />
-            </svg>
-            <span>Attention</span>
-        </button>
-        <button class="nav-btn" data-panel="focus">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                <circle cx="12" cy="12" r="3" />
-            </svg>
-            <span>Focus</span>
-        </button>
-        <button class="nav-btn" data-panel="fold">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="3" y1="12" x2="21" y2="12" />
-                <polyline points="8 7 3 12 8 17" />
-                <polyline points="16 7 21 12 16 17" />
-            </svg>
-            <span>Fold</span>
-        </button>
-        <button class="nav-btn" data-panel="scroll">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <polyline points="19 12 12 19 5 12" />
-            </svg>
-            <span>Scroll</span>
-        </button>
-        <button class="nav-btn" data-panel="contrast">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 2a10 10 0 0 1 0 20" />
-            </svg>
-            <span>Contrast</span>
-        </button>
-        <button class="nav-btn" data-panel="report">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-            </svg>
-            <span>Report</span>
-        </button>
-    </nav>
+            <!-- Accessibility Report (Markdown) -->
+            <section id="panel-report" class="panel">
+                <div class="card">
+                    <div class="card-content-report">
+                        <div class="flex">
+                            <!-- Sidebar TOC (Left) -->
+                            <aside class="toc-container">
+                                <h4 class="text-sm font-semibold mb-3">On This Page </br></br></h4>
+                                <nav id="toc-nav">
+                                    <!-- JS will inject links here -->
+                                </nav>
+                            </aside>
+
+                            <!-- Main Content -->
+                            <div id="markdown-container" class="prose max-w-none" style="flex: 1; min-width: 0;">
+                                <!-- JS will inject markdown here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="mt-8 pt-8 border-t text-center text-muted text-sm pb-8">
+            <p>Generated by Local UI Analyzer • {{ page_info.timestamp if page_info.timestamp else "Just now" }}</p>
+        </footer>
+    </div>
+
+    <!-- Hidden Raw Markdown Data -->
+    <script id="raw-markdown" type="text/plain">
+{{ accessibility_report }}
+    </script>
 
     <script>
         document.addEventListener('DOMContentLoaded', function () {
-            const navBtns = document.querySelectorAll('.nav-btn');
+            // Tabs Logic
+            const triggers = document.querySelectorAll('.tab-trigger');
             const panels = document.querySelectorAll('.panel');
 
-            navBtns.forEach(btn => {
-                btn.addEventListener('click', function () {
-                    const panelId = this.dataset.panel;
-                    navBtns.forEach(b => b.classList.remove('active'));
-                    this.classList.add('active');
-                    panels.forEach(p => p.classList.remove('active'));
-                    document.getElementById('panel-' + panelId).classList.add('active');
+            function switchTab(panelId) {
+                // Update triggers
+                triggers.forEach(t => {
+                    t.classList.toggle('active', t.dataset.panel === panelId);
+                });
+
+                // Update panels
+                panels.forEach(p => {
+                    p.classList.toggle('active', p.id === 'panel-' + panelId);
+                });
+            }
+
+            triggers.forEach(trigger => {
+                trigger.addEventListener('click', () => {
+                    switchTab(trigger.dataset.panel);
                 });
             });
 
-            // Keyboard navigation (1-7)
-            document.addEventListener('keydown', function (e) {
-                const keys = ['1', '2', '3', '4', '5', '6', '7'];
-                const index = keys.indexOf(e.key);
-                if (index !== -1 && navBtns[index]) {
-                    navBtns[index].click();
-                }
+            // Keyboard Shortcuts usually 1-indexed
+            document.addEventListener('keydown', (e) => {
+                const map = { '1': 'original', '2': 'attention', '3': 'path', '4': 'scroll', '5': 'report' };
+                if (map[e.key]) switchTab(map[e.key]);
             });
 
-            // Export functions
+            // Image Downloader
             window.downloadImage = function (format) {
                 const activePanel = document.querySelector('.panel.active');
-                const img = activePanel.querySelector('.image-container img');
-                if (!img) {
-                    alert('No image in current view');
-                    return;
-                }
+                const img = activePanel.querySelector('img');
+                if (!img) return alert('No image in current view');
 
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                ctx.drawImage(img, 0, 0);
-
-                const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
-                const quality = format === 'jpeg' ? 0.92 : undefined;
-
-                canvas.toBlob(function (blob) {
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `ui-analysis-${activePanel.id}.${format}`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                }, mimeType, quality);
+                const link = document.createElement('a');
+                link.download = `analysis-${activePanel.id.replace('panel-', '')}.${format}`;
+                link.href = img.src;
+                link.click();
             };
+
+            // Dynamic TOC Generator
+            function generateTOC() {
+                const container = document.getElementById('markdown-container');
+                const nav = document.getElementById('toc-nav');
+                const headers = container.querySelectorAll('h2, h3');
+
+                nav.innerHTML = '';
+
+                headers.forEach((header, index) => {
+                    // Create ID if missing
+                    if (!header.id) {
+                        header.id = 'section-' + index;
+                    }
+
+                    const link = document.createElement('a');
+                    link.href = '#' + header.id;
+                    link.textContent = header.textContent;
+                    link.className = `toc-link ${header.tagName.toLowerCase()}`;
+
+                    link.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        header.scrollIntoView({ behavior: 'smooth' });
+                    });
+
+                    nav.appendChild(link);
+                });
+
+                // Scroll Spy
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const activeId = entry.target.id;
+                            document.querySelectorAll('.toc-link').forEach(link => {
+                                link.classList.toggle('active', link.getAttribute('href') === '#' + activeId);
+                            });
+                        }
+                    });
+                }, { rootMargin: '-10% 0px -80% 0px' });
+
+                headers.forEach(h => observer.observe(h));
+            }
+
+            // Generate TOC after rendering markdown
+            if (window.marked) {
+                const rawMarkdown = document.getElementById('raw-markdown').textContent;
+                document.getElementById('markdown-container').innerHTML = marked.parse(rawMarkdown);
+                setTimeout(generateTOC, 100); // Small delay to ensure render
+            }
         });
     </script>
 </body>

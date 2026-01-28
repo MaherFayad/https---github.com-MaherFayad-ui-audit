@@ -31,7 +31,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.5-pro"
 
 # Initialize Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -68,7 +68,8 @@ def image_to_base64(image: np.ndarray) -> str:
     return base64.b64encode(buffer).decode('utf-8')
 
 
-def chunk_image(image: np.ndarray, chunk_size: tuple = (800, 600), 
+def chunk_image(image: np.ndarray, saliency_map: np.ndarray = None, 
+                chunk_size: tuple = (800, 600), 
                 overlap: float = 0.2) -> list[dict]:
     """
     Split image into overlapping chunks for better VLM analysis.
@@ -113,8 +114,8 @@ def chunk_image(image: np.ndarray, chunk_size: tuple = (800, 600),
                 'y_offset': y,
                 'row': row,
                 'col': col,
-                'width': end_x - x,
-                'height': end_y - y
+                'height': end_y - y,
+                'saliency_map': saliency_map[y:end_y, x:end_x] if saliency_map is not None else None
             })
             col += 1
         row += 1
@@ -132,12 +133,40 @@ def analyze_single_chunk(chunk_data: dict) -> list[dict]:
     y_offset = chunk_data['y_offset']
     height, width = chunk.shape[:2]
     
-    # Convert OpenCV image to PIL for Gemini
+    # Prepare inputs for Gemini
+    contents = []
+    
+    # 1. UI Screenshot
     chunk_rgb = cv2.cvtColor(chunk, cv2.COLOR_BGR2RGB)
     pil_image = Image.fromarray(chunk_rgb)
     
+    # 2. Saliency Heatmap (if available) - This is the key change!
+    heatmap_context = ""
+    if chunk_data.get('saliency_map') is not None:
+        # Apply colormap to make it easier for Gemini to see "hot" areas
+        saliency_chunk = chunk_data['saliency_map']
+        heatmap_colored = cv2.applyColorMap(saliency_chunk, cv2.COLORMAP_JET)
+        heatmap_rgb = cv2.cvtColor(heatmap_colored, cv2.COLOR_RGB2BGR)
+        pil_heatmap = Image.fromarray(heatmap_rgb)
+        
+        contents = [pil_image, pil_heatmap]
+        heatmap_context = """
+**CRITICAL INSTRUCTION**: You are provided with TWO images:
+1. The UI Screenshot (Visual).
+2. The Saliency Heatmap (Ground Truth). [Red/Yellow = High Attention, Blue = Low].
+
+**YOUR TASK**:
+- Use the Saliency Heatmap to validte your predictions.
+- IF an area is RED/YELLOW in the heatmap, you MUST identify the UI element at that location.
+- IF an area is BLUE, do not assign a "focal" type unless it is a critical navigation element.
+- Identify the UI elements that correspond to the high-attention hotspots.
+"""
+    else:
+        contents = [pil_image]
+
     prompt = f"""Act as a predictive eye-tracking model.
 Analyze this UI section ({width}x{height} pixels) to predict user attention fixations.
+{heatmap_context}
 
 Principles of Visual Focus:
 1. **High Contrast**: Bright/dark elements stand out (CTAs, buttons).
@@ -166,32 +195,51 @@ Where x,y are relative to the top-left of this image chunk.
 Return ONLY raw JSON. No markdown formatting.
 """
 
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[prompt, pil_image]
-        )
-        response_text = response.text.strip()
-        
-        # Extract JSON from response
-        json_match = re.search(r'\[[\s\S]*?\]', response_text)
-        if json_match:
-            boxes = json.loads(json_match.group())
-            adjusted_boxes = []
-            for box in boxes:
-                if all(k in box for k in ['x', 'y', 'w', 'h']):
-                    adjusted_boxes.append({
-                        'x': max(0, int(box['x']) + x_offset),
-                        'y': max(0, int(box['y']) + y_offset),
-                        'w': max(1, int(box['w'])),
-                        'h': max(1, int(box['h'])),
-                        'label': box.get('label', 'UI Element'),
-                        'chunk': f"r{chunk_data['row']}c{chunk_data['col']}"
-                    })
-            return adjusted_boxes
-    except Exception as e:
-        print(f"  Warning: Chunk analysis failed: {e}")
+    max_retries = 3
+    base_delay = 2
     
+    for attempt in range(max_retries):
+        try:
+            full_contents = [prompt] + contents
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=full_contents
+            )
+            response_text = response.text.strip()
+            
+            # Extract JSON from response
+            json_match = re.search(r'\[[\s\S]*?\]', response_text)
+            if json_match:
+                boxes = json.loads(json_match.group())
+                adjusted_boxes = []
+                for box in boxes:
+                    if all(k in box for k in ['x', 'y', 'w', 'h']):
+                        adjusted_boxes.append({
+                            'x': max(0, int(box['x']) + x_offset),
+                            'y': max(0, int(box['y']) + y_offset),
+                            'w': max(1, int(box['w'])),
+                            'h': max(1, int(box['h'])),
+                            'label': box.get('label', 'UI Element'),
+                            'chunk': f"r{chunk_data['row']}c{chunk_data['col']}"
+                        })
+                return adjusted_boxes
+            else:
+                print(f"  Warning: No valid JSON found in chunk response (Attempt {attempt+1}/{max_retries})")
+                
+        except Exception as e:
+            print(f"  Warning: Chunk analysis failed (Attempt {attempt+1}/{max_retries}): {e}")
+            if "429" in str(e) or "503" in str(e) or "500" in str(e) or "overloaded" in str(e).lower():
+                time.sleep(base_delay * (2 ** attempt))  # Exponential backoff
+                continue
+            else:
+                break # Break on non-transient errors
+        
+        # If we got here but failed to parse/extract, maybe retry? 
+        # Usually parsing error isn't transient unless model output was cut off.
+        # Let's retry on parsing failure too if we have attempts left.
+        # But for now, we only retry on Exception or explicitly coded conditions.
+    
+    print(f"  Error: Failed to analyze chunk after {max_retries} attempts.")
     return []
 
 
@@ -235,13 +283,14 @@ def merge_chunk_boxes(all_boxes: list[dict], iou_threshold: float = 0.5) -> list
     return merged
 
 
-def get_attention_boxes(image: np.ndarray, use_chunking: bool = True) -> list[dict]:
+def get_attention_boxes(image: np.ndarray, saliency_map: np.ndarray = None, use_chunking: bool = True) -> list[dict]:
     """
     Query Ollama to identify eye-catching UI elements.
     Uses chunking strategy for better results with small VLMs.
     
     Args:
         image: Input image
+        saliency_map: Optional EML-NET heatmap to guide detection
         use_chunking: If True, split image into chunks first
         
     Returns:
@@ -255,7 +304,7 @@ def get_attention_boxes(image: np.ndarray, use_chunking: bool = True) -> list[di
     
     # Chunk the image for better accuracy
     print(f"  Chunking image ({width}x{height})...")
-    chunks = chunk_image(image, chunk_size=(1921, 4000), overlap=0.1)
+    chunks = chunk_image(image, saliency_map=saliency_map, chunk_size=(1921, 4000), overlap=0.1)
     print(f"  Created {len(chunks)} chunks")
     
     # Analyze each chunk with rate limiting
@@ -700,7 +749,9 @@ Provide a professional, actionable report with these sections:
 - **Accessibility & Clarity**
 - **Recommendations**
 
-Format with Markdown. Be critical and specific."""
+Format with Markdown. 
+IMPORTANT: Return ONLY the markdown content. Do NOT include any conversational filler like "Here is the report" or "As an AI". Start directly with the # Report Title or ## Section.
+"""
 
     try:
         response = client.models.generate_content(
@@ -762,58 +813,169 @@ def analyze_above_fold(image: np.ndarray, boxes: list[dict],
     }
 
 
-def generate_scroll_depth_analysis(image: np.ndarray, boxes: list[dict]) -> dict:
+def sort_boxes_by_reading_order(boxes: list[dict]) -> list[dict]:
     """
-    Segment the page into scroll depth zones and calculate attention per zone.
+    Sort boxes in approximate reading order (Z-pattern / F-pattern).
+    Top-to-bottom, then Left-to-right.
+    Uses a robust Y-banding strategy to group elements into logical rows.
+    """
+    if not boxes:
+        return []
+        
+    # Create copy to avoid modifying original list
+    boxes_copy = [b.copy() for b in boxes]
     
-    Zones: 0-25%, 25-50%, 50-75%, 75-100%
+    # Calculate centroids and dynamic band height
+    # Use 10% of image height or 50px as default band height if passed
+    # but we don't have image height here easily unless we inspect boxes or pass it in.
+    # Let's infer approximate scale from the boxes range.
+    min_y = min(b['y'] for b in boxes_copy) if boxes_copy else 0
+    max_y = max(b['y'] + b['h'] for b in boxes_copy) if boxes_copy else 1000
+    total_height = max_y - min_y
     
-    Returns:
-        Dict with zone-by-zone attention breakdown
+    # Adaptive band height: 1/12th of content height (approx 12 rows per screen)
+    # clamped between 40px and 120px
+    band_height = max(40, min(120, total_height // 12))
+    
+    # Helper to get centroid
+    def get_centroid(b):
+        return (b['x'] + b['w'] // 2, b['y'] + b['h'] // 2)
+
+    # We sort by:
+    # 1. Y-Band of CENTROID -> Robust row grouping
+    # 2. X coordinate of CENTROID -> Left to Right reading
+    
+    def sort_key(box):
+        cx, cy = get_centroid(box)
+        y_band = cy // band_height
+        return (y_band, cx)
+        
+    boxes_copy.sort(key=sort_key)
+    
+    # Debug print to understand sorting
+    print(f"DEBUG: Sorting boxes with band_height={band_height}")
+    for i, b in enumerate(boxes_copy):
+        cx, cy = get_centroid(b)
+        print(f"  Box {i+1}: cy={cy} (Band {cy // band_height}), cx={cx} -> Label: {b.get('label', '?')}")
+        
+    return boxes_copy
+
+
+
+
+def generate_scanpath_visualization(image: np.ndarray, boxes: list[dict]) -> np.ndarray:
+    """
+    Generate a scanpath visualization connecting attention points in order.
+    """
+    result = image.copy()
+    overlay = result.copy()
+    
+    # Sort boxes designed for reading flow
+    sorted_boxes = sort_boxes_by_reading_order(boxes)
+    
+    # Draw path lines first
+    points = []
+    for box in sorted_boxes:
+        cx = box['x'] + box['w'] // 2
+        cy = box['y'] + box['h'] // 2
+        points.append((cx, cy))
+    
+    if len(points) > 1:
+        # Draw anti-aliased thick lines connecting points
+        for i in range(len(points) - 1):
+            pt1 = points[i]
+            pt2 = points[i+1]
+            cv2.line(overlay, pt1, pt2, (50, 50, 255), 4, cv2.LINE_AA)
+            
+    # Blend lines with some transparency
+    cv2.addWeighted(overlay, 0.6, result, 0.4, 0, result)
+    
+    # Draw numbered circles
+    for i, box in enumerate(sorted_boxes):
+        cx = box['x'] + box['w'] // 2
+        cy = box['y'] + box['h'] // 2
+        
+        # Determine radius based on box size but clamped
+        radius = max(20, min(box['w'], box['h']) // 4)
+        radius = min(radius, 40) # Max limit
+        
+        # Circle background
+        cv2.circle(result, (cx, cy), radius, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.circle(result, (cx, cy), radius, (255, 255, 255), 2, cv2.LINE_AA)
+        
+        # Number
+        text = str(i + 1)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        thickness = 2
+        
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        text_x = cx - text_w // 2
+        text_y = cy + text_h // 2
+        
+        cv2.putText(result, text, (text_x, text_y), font, font_scale, 
+                    (255, 255, 255), thickness, cv2.LINE_AA)
+                    
+    return result
+
+
+def generate_scroll_depth_analysis(image: np.ndarray, boxes: list[dict], viewport_height: int = 900) -> dict:
+    """
+    Segment the page into logical "Screens" (Folds) based on viewport height.
     """
     height, width = image.shape[:2]
     
-    # Create attention mask
+    # Default to 900 if viewport is missing/zero
+    if not viewport_height or viewport_height <= 0:
+        viewport_height = 900
+        
+    # Calculate screen boundaries
+    num_screens = int(np.ceil(height / viewport_height))
+    
+    # Create attention mask for exact calculation
     attention_mask = np.zeros((height, width), dtype=np.float32)
     for box in boxes:
         x, y, w, h = box['x'], box['y'], box['w'], box['h']
         attention_mask[y:y+h, x:x+w] += 1.0
-    
+        
+    # Gaussian blur for smoother "attention spread"
     attention_mask = gaussian_filter(attention_mask, sigma=min(width, height) / 35)
     total_attention = attention_mask.sum()
     
-    # Define zones
-    zones = [
-        {'name': '0-25%', 'start': 0, 'end': 0.25, 'label': 'Top Quarter'},
-        {'name': '25-50%', 'start': 0.25, 'end': 0.50, 'label': 'Second Quarter'},
-        {'name': '50-75%', 'start': 0.50, 'end': 0.75, 'label': 'Third Quarter'},
-        {'name': '75-100%', 'start': 0.75, 'end': 1.0, 'label': 'Bottom Quarter'},
-    ]
-    
     zone_results = []
-    for zone in zones:
-        start_y = int(height * zone['start'])
-        end_y = int(height * zone['end'])
+    
+    # Analyze each screen
+    for i in range(num_screens):
+        start_y = i * viewport_height
+        end_y = min((i + 1) * viewport_height, height)
         
+        # Calculate attention in this strip
         zone_attention = attention_mask[start_y:end_y, :].sum()
         zone_pct = (zone_attention / total_attention * 100) if total_attention > 0 else 0
+        
+        # Estimate "Visibility Opportunity" (decay)
+        # Assuming 100% at top, decaying by 20% per scroll roughly
+        # Formula: 100 * (0.8 ^ i)
+        visibility = 100.0 * (0.8 ** i)
         
         # Count boxes in this zone
         zone_boxes = sum(1 for b in boxes 
                         if start_y <= b['y'] + b['h'] / 2 < end_y)
         
         zone_results.append({
-            'name': zone['name'],
-            'label': zone['label'],
+            'name': f'Screen {i+1}',
+            'label': f'Fold {i+1}',
             'start_y': start_y,
             'end_y': end_y,
             'attention_pct': float(round(zone_pct, 1)),
+            'visibility_pct': float(round(visibility, 1)),
             'box_count': int(zone_boxes)
         })
     
     return {
         'zones': zone_results,
         'total_height': height,
+        'viewport_height': viewport_height,
         'total_boxes': len(boxes)
     }
 
@@ -853,54 +1015,79 @@ def draw_fold_line(image: np.ndarray, fold_y: int,
 def generate_scroll_depth_visualization(image: np.ndarray, 
                                         scroll_analysis: dict) -> np.ndarray:
     """
-    Create a visualization with scroll depth zone overlays.
+    Create a visualization with scroll depth screens and retention curve.
     """
     result = image.copy()
     height, width = result.shape[:2]
     
-    # Colors for zones (gradient from green to red)
-    zone_colors = [
-        (0, 200, 0),    # Green - top
-        (0, 200, 200),  # Yellow
-        (0, 100, 200),  # Orange  
-        (0, 0, 200),    # Red - bottom
-    ]
+    zones = scroll_analysis.get('zones', [])
+    if not zones:
+        return result
+        
+    # Create a sidebar for the retention graph (right 200px)
+    sidebar_width = 250
+    # Make sure we don't cover too much if image is small
+    sidebar_width = min(sidebar_width, width // 3)
     
-    for i, zone in enumerate(scroll_analysis['zones']):
+    # Create semi-transparent overlay for sidebar
+    sidebar = result[:, width-sidebar_width:].copy()
+    grey_layer = np.zeros_like(sidebar)
+    grey_layer[:] = (30, 30, 30)
+    # Darken right side
+    cv2.addWeighted(sidebar, 0.2, grey_layer, 0.8, 0, result[:, width-sidebar_width:])
+    
+    # Draw retention curve points
+    curve_points = []
+    
+    for i, zone in enumerate(zones):
         start_y = zone['start_y']
         end_y = zone['end_y']
-        color = zone_colors[i]
+        mid_y = int((start_y + end_y) / 2)
         
-        # Draw zone boundary line
+        # Draw Fold Line (unless it's the very top)
         if i > 0:
-            cv2.line(result, (0, start_y), (width, start_y), color, 2)
+            # Dashed line logic
+            line_y = start_y
+            dash_len = 15
+            for x in range(0, width - sidebar_width, dash_len * 2):
+                 cv2.line(result, (x, line_y), (min(x + dash_len, width - sidebar_width), line_y), 
+                          (200, 200, 200), 2)
+            
+            # Label
+            cv2.putText(result, f"FOLD {i+1}", (10, line_y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+
+        # Retention Graph Point
+        # X position based on visibility/attention
+        # Let's use visibility_pct for the curve as it represents "Users Remaining" model
+        vis_pct = zone.get('visibility_pct', 100)
+        att_pct = zone.get('attention_pct', 0)
         
-        # Add zone label with attention percentage
-        label = f"{zone['name']}: {zone['attention_pct']:.0f}% attention"
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        thickness = 2
+        graph_x = width - sidebar_width + 20 + int((sidebar_width - 40) * (vis_pct / 100))
+        curve_points.append((graph_x, mid_y))
         
-        label_y = start_y + 30 if start_y + 30 < end_y else start_y + 15
+        # Draw Label in Sidebar
+        label = f"Screen {i+1}"
+        cv2.putText(result, label, (width - sidebar_width + 10, start_y + 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
-        # Background for text
-        (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
-        cv2.rectangle(result, (5, label_y - text_h - 5), 
-                      (text_w + 15, label_y + 5), (0, 0, 0), -1)
-        cv2.putText(result, label, (10, label_y), font, font_scale, 
-                    color, thickness)
+        cv2.putText(result, f"Attn: {att_pct:.0f}%", (width - sidebar_width + 10, start_y + 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 255, 150), 1)
+                   
+        cv2.putText(result, f"Seen: {vis_pct:.0f}%", (width - sidebar_width + 10, start_y + 85), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 200, 255), 1)
+
+    # Draw the curve connecting points
+    if len(curve_points) > 1:
+        # Draw smooth curve or polyline
+        pts = np.array(curve_points, np.int32)
+        pts = pts.reshape((-1, 1, 2))
+        cv2.polylines(result, [pts], False, (100, 200, 255), 3, cv2.LINE_AA)
         
-        # Draw attention bar on right side
-        bar_width = 30
-        bar_height = int((end_y - start_y) * zone['attention_pct'] / 100)
-        bar_x = width - bar_width - 10
-        bar_y = end_y - bar_height
-        
-        cv2.rectangle(result, (bar_x, bar_y), (bar_x + bar_width, end_y), 
-                      color, -1)
-        cv2.rectangle(result, (bar_x, start_y), (bar_x + bar_width, end_y), 
-                      color, 2)
-    
+        # Draw dots
+        for pt in curve_points:
+            cv2.circle(result, pt, 5, (255, 255, 255), -1)
+
     return result
 
 
@@ -948,29 +1135,47 @@ def run_analysis(image_path: str, output_dir: str = "output",
     # Create output directory if needed
     os.makedirs(output_dir, exist_ok=True)
     
-    # Step 1: Get attention boxes from Ollama
-    print("Analyzing attention points with Ollama...")
-    boxes = get_attention_boxes(image)
+    # Step 1: Generate pure saliency map FIRST
+    print("Generating pure vision saliency map (EML-NET)...")
+    saliency_map_uint8 = saliency_engine.predict(image)
+    
+    attention_mask = None
+    if saliency_map_uint8 is not None:
+        attention_mask = saliency_map_uint8.astype(np.float32) / 255.0
+        print("  EML-NET Saliency Map generated successfully.")
+    else:
+        print("  Warning: EML-NET failed. Will fallback to box-based heatmap.")
+    
+    # Step 2: Get attention boxes from Gemini (Guided by EML-NET)
+    print("Analyzing attention points with Gemini (Guided by EML-NET)...")
+    boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8)
     print(f"Found {len(boxes)} attention areas")
     
-    # Step 2: Generate attention heatmap and AOI image
-    print("Generating attention heatmap (Hybrid Saliency)...")
-    # Get the shared saliency map first
-    attention_mask = get_saliency_map(image, boxes)
+    # Step 3: Generate attention heatmap and AOI image
+    print("Generating attention heatmap...")
+    # Generate hybrid heatmap
     attention_heatmap = generate_attention_heatmap(image, boxes, saliency_map=attention_mask)
+    # If we didn't have EML-NET before, we have the box-based one now inside calculate_focus_score or we need it for metrics
+    if attention_mask is None:
+        # Re-generate mask from boxes for metrics if EML-NET failed
+        attention_mask = generate_eml_heatmap_mask((height, width), boxes)
+        
     aoi_image = generate_aoi_image(image, boxes)
     
-    # Step 3: Generate contrast map
-    print("Generating contrast map...")
-    contrast_map = generate_contrast_map(image)
+    # Step 3.5: Generate Scanpath (New)
+    print("Generating scanpath visualization...")
+    scanpath_image = generate_scanpath_visualization(image, boxes)
     
-    # Step 4: Generate focus map
-    print("Generating focus map...")
-    focus_map = generate_focus_map(image, boxes)
+    # Step 3 (Skipped): Generate contrast map
+    # print("Generating contrast map...")
+    # contrast_map = generate_contrast_map(image)
+    
+    # Step 4 (Skipped): Generate focus map
+    # print("Generating focus map...")
+    # focus_map = generate_focus_map(image, boxes)
     
     # Step 5: Calculate focus score
     print("Calculating focus score...")
-    # Use EML-NET generated mask (attention_mask computed above)
     focus_score = calculate_focus_score(attention_mask, boxes, image.shape)
     print(f"Focus Score: {focus_score:.1f}%")
     
@@ -980,13 +1185,17 @@ def run_analysis(image_path: str, output_dir: str = "output",
     above_fold_analysis = analyze_above_fold(image, boxes, fold_y)
     print(f"Above fold attention: {above_fold_analysis['above_fold_attention_pct']:.1f}%")
     
-    # Step 7: Scroll depth analysis
+    # Step 7: Scroll depth analysis (Updated with viewport)
     print("Analyzing scroll depth zones...")
-    scroll_analysis = generate_scroll_depth_analysis(image, boxes)
+    scroll_analysis = generate_scroll_depth_analysis(image, boxes, viewport_height=viewport_height)
     
-    # Step 8: Generate fold line visualization
-    print("Generating fold line visualization...")
-    fold_image = draw_fold_line(image.copy(), fold_y, above_fold_analysis)
+    # Step 8.5: Apply Fold Line to ALL images
+    print("Applying fold line to all visualizations...")
+    # Note: scroll_depth_image gets its own special folds in generation, so we skip it here to avoid double drawing
+    image_with_fold = draw_fold_line(image.copy(), fold_y, above_fold_analysis)
+    attention_with_fold = draw_fold_line(attention_heatmap, fold_y, above_fold_analysis)
+    aoi_with_fold = draw_fold_line(aoi_image, fold_y, above_fold_analysis)
+    scanpath_with_fold = draw_fold_line(scanpath_image, fold_y, above_fold_analysis)
     
     # Step 9: Generate scroll depth visualization
     print("Generating scroll depth visualization...")
@@ -1007,12 +1216,13 @@ def run_analysis(image_path: str, output_dir: str = "output",
     
     # Save images
     print("Saving analysis images...")
-    cv2.imwrite(os.path.join(output_dir, "original.png"), image)
-    cv2.imwrite(os.path.join(output_dir, "attention.png"), attention_heatmap)
-    cv2.imwrite(os.path.join(output_dir, "aoi.png"), aoi_image)
-    cv2.imwrite(os.path.join(output_dir, "contrast.png"), contrast_map)
-    cv2.imwrite(os.path.join(output_dir, "focus.png"), focus_map)
-    cv2.imwrite(os.path.join(output_dir, "fold.png"), fold_image)
+    cv2.imwrite(os.path.join(output_dir, "original.png"), image_with_fold)
+    cv2.imwrite(os.path.join(output_dir, "attention.png"), attention_with_fold)
+    cv2.imwrite(os.path.join(output_dir, "aoi.png"), aoi_with_fold)
+    # cv2.imwrite(os.path.join(output_dir, "contrast.png"), contrast_map)
+    # cv2.imwrite(os.path.join(output_dir, "focus.png"), focus_map)
+    cv2.imwrite(os.path.join(output_dir, "scanpath.png"), scanpath_with_fold)
+    cv2.imwrite(os.path.join(output_dir, "fold.png"), image_with_fold) # Fold view is just original with fold
     cv2.imwrite(os.path.join(output_dir, "scroll_depth.png"), scroll_depth_image)
     
     # Convert images to base64 for HTML embedding
@@ -1022,11 +1232,12 @@ def run_analysis(image_path: str, output_dir: str = "output",
         return f"data:image/png;base64,{b64}"
     
     results = {
-        'original': img_to_base64_data_uri(image),
-        'attention': img_to_base64_data_uri(attention_heatmap),
-        'contrast': img_to_base64_data_uri(contrast_map),
-        'focus': img_to_base64_data_uri(focus_map),
-        'fold': img_to_base64_data_uri(fold_image),
+        'original': img_to_base64_data_uri(image_with_fold),
+        'attention': img_to_base64_data_uri(attention_with_fold),
+        # 'contrast': img_to_base64_data_uri(contrast_map),
+        # 'focus': img_to_base64_data_uri(focus_map),
+        'scanpath': img_to_base64_data_uri(scanpath_with_fold),
+        'fold': img_to_base64_data_uri(image_with_fold),
         'scroll_depth': img_to_base64_data_uri(scroll_depth_image),
         'focus_score': focus_score,
         'above_fold_analysis': above_fold_analysis,

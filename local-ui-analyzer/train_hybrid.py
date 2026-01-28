@@ -47,22 +47,16 @@ UEYES_ROOT = "models/Datasets/Ueyes"
 MODEL_SAVE_PATH = "models/eml_net_hybrid.pth"
 
 # Device configuration
-# Device configuration
-# Forced CPU due to DML instability and CUDA incompatibility with RTX 5060 Ti
-DEVICE = torch.device("cpu")
-print(f"Device: {DEVICE} (Forced CPU)")
-USE_BFLOAT16 = False 
-
-# DML Disabled for stability
-# try:
-#     import torch_directml
-#     DEVICE = torch_directml.device()
-#     print(f"Device: DirectML ({DEVICE})")
-#     USE_BFLOAT16 = False 
-# except ImportError:
-#     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     print(f"Device: {DEVICE}")
-#     USE_BFLOAT16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported() if DEVICE.type == 'cuda' else False
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    USE_BFLOAT16 = torch.cuda.is_bf16_supported()
+    print(f"Device: {DEVICE} ({torch.cuda.get_device_name(0)})")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(f"BFloat16 supported: {USE_BFLOAT16}")
+else:
+    DEVICE = torch.device("cpu")
+    USE_BFLOAT16 = False
+    print(f"Device: {DEVICE} (CPU fallback)")
 
 
 
