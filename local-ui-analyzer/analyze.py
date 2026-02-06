@@ -884,40 +884,53 @@ You are auditing a UI based on raw screenshots and new quantitative data provide
    - Analyze the Retention Curve. If attention drops by >50% at the first fold, suggest "Scroll Cues" or "Visual Bridges."
 
 ### OUTPUT FORMAT
-Generate a comprehensive WCAG 2.2 Accessibility Audit with these sections:
+Generate a comprehensive WCAG 2.2 Accessibility Audit. Use EXACTLY the structure below:
 
 ## Executive Summary
-Brief 2-3 sentence overview of the UI's attention and accessibility health.
+Write 2-3 sentences summarizing the UI's overall attention health and key accessibility findings.
 
 ## Metrics Dashboard
 | Metric | Value | Status |
 |--------|-------|--------|
-| Focus Score | {focus_score:.1f}% | [PASS/WARNING/FAIL] |
-| Clarity Score | {clarity_score:.1f}% | [PASS/WARNING/FAIL] |
-| ATF Attention | {above_fold.get('above_fold_attention_pct', 0) if above_fold else 'N/A'}% | [PASS/WARNING/FAIL] |
+| Focus Score | {focus_score:.1f}% | [PASS] if ≥50%, [WARNING] if 35-49%, [FAIL] if <35% |
+| Clarity Score | {clarity_score:.1f}% | [PASS] if ≥60%, [WARNING] if 45-59%, [FAIL] if <45% |
+| ATF Attention | {above_fold.get('above_fold_attention_pct', 0) if above_fold else 'N/A'}% | [PASS] if ≥15%, [WARNING] if 8-14%, [FAIL] if <8% |
+
+Use exactly [PASS], [WARNING], or [FAIL] in the Status column based on the thresholds above.
 
 ## Attention & Hierarchy Analysis
-- Analyze the predicted scanpath
-- Flag any hierarchy failures
-- Evaluate CTA visibility
+Analyze the scanpath data provided. Address:
+- **Scanpath Flow**: Is the visual hierarchy guiding users correctly?
+- **Hierarchy Issues**: Any failures where key elements are missed?
+- **CTA Visibility**: Is the primary call-to-action prominent?
 
 ## WCAG 2.2 Accessibility Audit
 ### Color Contrast (1.4.3, 1.4.6)
+Evaluate text/background contrast. Note any potential issues.
+
 ### Text Readability (1.4.4, 1.4.12)
+Assess text sizing, spacing, and legibility.
+
 ### Target Size (2.5.5, 2.5.8)
+Check that interactive elements are large enough for touch/click (minimum 24x24px, ideally 44x44px).
+
 ### Focus Indicators (2.4.7, 2.4.11)
+Evaluate if focus states are visible for keyboard navigation.
 
 ## Above-the-Fold & Scroll Analysis
-- ATF content effectiveness
-- Scroll incentives present/missing
-- Visual bridge recommendations
+Based on the retention curve data:
+- How effective is the above-the-fold content?
+- Are there scroll incentives (arrows, partial content)?
+- Suggest visual bridges if attention drops sharply
 
 ## Prioritized Recommendations
-1. [Critical - must fix]
-2. [High - should fix]
-3. [Medium - consider fixing]
+List 3-5 actionable recommendations, ordered by priority:
+1. **Critical**: [Must fix - blocks users or violates WCAG AA]
+2. **High**: [Should fix - significantly impacts UX]
+3. **Medium**: [Consider fixing - improves experience]
 
-IMPORTANT: Return ONLY the markdown content. Do NOT include any conversational filler like "Here is the report" or "As an AI". Start directly with ## Executive Summary."""
+---
+IMPORTANT: Return ONLY the markdown. NO conversational filler. Start directly with ## Executive Summary."""
 
     try:
         response = client.models.generate_content(

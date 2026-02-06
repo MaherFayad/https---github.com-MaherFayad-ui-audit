@@ -404,19 +404,35 @@
             display: block;
         }
 
-        /* Markdown Prose */
+        /* Markdown Prose - Enhanced Styling */
         .prose {
-            max-width: 65ch;
+            max-width: none;
             color: var(--foreground);
         }
 
         .prose h1,
         .prose h2,
         .prose h3 {
-            margin-top: 1.5em;
-            margin-bottom: 0.5rem;
+            margin-top: 2em;
+            margin-bottom: 0.75rem;
             color: var(--foreground);
             font-weight: 600;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .prose h2 {
+            font-size: 1.35rem;
+        }
+
+        .prose h3 {
+            font-size: 1.1rem;
+            border-bottom: none;
+            color: var(--muted-foreground);
+        }
+
+        .prose h2:first-child {
+            margin-top: 0;
         }
 
         .prose p {
@@ -424,13 +440,15 @@
             line-height: 1.7;
         }
 
-        .prose ul {
+        .prose ul,
+        .prose ol {
             margin-bottom: 1rem;
             padding-left: 1.5rem;
         }
 
         .prose li {
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.5rem;
+            line-height: 1.6;
         }
 
         .prose strong {
@@ -439,10 +457,116 @@
         }
 
         .prose blockquote {
-            border-left: 4px solid var(--border);
+            border-left: 4px solid var(--primary);
             padding-left: 1rem;
-            font-style: italic;
-            color: var(--muted-foreground);
+            margin: 1.5rem 0;
+            background: var(--secondary);
+            padding: 1rem 1rem 1rem 1.5rem;
+            border-radius: 0 var(--radius) var(--radius) 0;
+            color: var(--foreground);
+            font-style: normal;
+        }
+
+        /* Tables - Professional Styling */
+        .prose table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-size: 0.9rem;
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        }
+
+        .prose thead {
+            background: var(--primary);
+            color: var(--primary-foreground);
+        }
+
+        .prose th {
+            font-weight: 600;
+            text-align: left;
+            padding: 0.875rem 1rem;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .prose td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .prose tbody tr:nth-child(even) {
+            background: var(--muted);
+        }
+
+        .prose tbody tr:hover {
+            background: rgba(0, 0, 0, 0.03);
+        }
+
+        /* Status Badges */
+        .status-pass {
+            display: inline-block;
+            background: rgba(34, 197, 94, 0.15);
+            color: #16a34a;
+            padding: 0.2rem 0.6rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-warning {
+            display: inline-block;
+            background: rgba(245, 158, 11, 0.15);
+            color: #d97706;
+            padding: 0.2rem 0.6rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-fail {
+            display: inline-block;
+            background: rgba(239, 68, 68, 0.15);
+            color: #dc2626;
+            padding: 0.2rem 0.6rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        /* Critical/Warning Callouts */
+        .prose .callout-critical {
+            background: rgba(239, 68, 68, 0.08);
+            border-left: 4px solid var(--destructive);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 var(--radius) var(--radius) 0;
+        }
+
+        .prose .callout-warning {
+            background: rgba(245, 158, 11, 0.08);
+            border-left: 4px solid var(--warning);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 var(--radius) var(--radius) 0;
+        }
+
+        /* Code in Prose */
+        .prose code {
+            background: var(--secondary);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+
+        /* Horizontal Rules */
+        .prose hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 2rem 0;
         }
 
         /* Heatmap Legend-ish colors for scores */
@@ -816,7 +940,35 @@
             if (window.marked) {
                 const rawMarkdown = document.getElementById('raw-markdown').textContent;
                 document.getElementById('markdown-container').innerHTML = marked.parse(rawMarkdown);
+
+                // Post-process: Convert status text to styled badges
+                convertStatusBadges();
+
                 setTimeout(generateTOC, 100); // Small delay to ensure render
+            }
+
+            // Convert [PASS], [WARNING], [FAIL] text to styled badges
+            function convertStatusBadges() {
+                const container = document.getElementById('markdown-container');
+
+                // Replace in table cells and other text
+                const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+                const textNodes = [];
+
+                while (walker.nextNode()) {
+                    if (walker.currentNode.nodeValue.match(/\[(PASS|WARNING|FAIL)\]/i)) {
+                        textNodes.push(walker.currentNode);
+                    }
+                }
+
+                textNodes.forEach(node => {
+                    const span = document.createElement('span');
+                    span.innerHTML = node.nodeValue
+                        .replace(/\[PASS\]/gi, '<span class="status-pass">✓ PASS</span>')
+                        .replace(/\[WARNING\]/gi, '<span class="status-warning">⚠ WARNING</span>')
+                        .replace(/\[FAIL\]/gi, '<span class="status-fail">✗ FAIL</span>');
+                    node.parentNode.replaceChild(span, node);
+                });
             }
         });
     </script>
