@@ -245,13 +245,23 @@ Return ONLY raw JSON. No markdown formatting.
 
 def merge_chunk_boxes(all_boxes: list[dict], iou_threshold: float = 0.5) -> list[dict]:
     """
-    Merge overlapping boxes from different chunks.
-    Uses IoU (Intersection over Union) to deduplicate.
+    Hierarchy-Aware NMS: Merge overlapping boxes while preserving focal elements inside structural containers.
+    
+    Key improvement: If a smaller "focal" box is contained within a larger "structural" box,
+    we KEEP both boxes (e.g., a CTA button inside a hero section).
+    
+    Args:
+        all_boxes: List of boxes with 'x', 'y', 'w', 'h', 'type' (focal/structural)
+        iou_threshold: IoU threshold for standard deduplication
+        
+    Returns:
+        Deduplicated list of boxes preserving hierarchy
     """
     if not all_boxes:
         return []
     
     def calc_iou(box1, box2):
+        """Calculate Intersection over Union."""
         x1 = max(box1['x'], box2['x'])
         y1 = max(box1['y'], box2['y'])
         x2 = min(box1['x'] + box1['w'], box2['x'] + box2['w'])
@@ -267,16 +277,69 @@ def merge_chunk_boxes(all_boxes: list[dict], iou_threshold: float = 0.5) -> list
         
         return intersection / union if union > 0 else 0.0
     
+    def calc_containment(smaller, larger):
+        """Calculate how much of smaller box is contained in larger box."""
+        x1 = max(smaller['x'], larger['x'])
+        y1 = max(smaller['y'], larger['y'])
+        x2 = min(smaller['x'] + smaller['w'], larger['x'] + larger['w'])
+        y2 = min(smaller['y'] + smaller['h'], larger['y'] + larger['h'])
+        
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        smaller_area = smaller['w'] * smaller['h']
+        
+        return intersection / smaller_area if smaller_area > 0 else 0.0
+    
+    def is_focal_in_structural(box_a, box_b):
+        """
+        Check if box_a is a focal element properly contained in structural box_b.
+        Returns True if we should KEEP box_a despite high IoU.
+        """
+        type_a = box_a.get('type', 'focal')
+        type_b = box_b.get('type', 'focal')
+        area_a = box_a['w'] * box_a['h']
+        area_b = box_b['w'] * box_b['h']
+        
+        # box_a must be smaller (the "inner" element)
+        if area_a >= area_b:
+            return False
+            
+        # box_a is focal, box_b is structural
+        if type_a == 'focal' and type_b == 'structural':
+            # Check if box_a is 80%+ contained within box_b
+            containment = calc_containment(box_a, box_b)
+            if containment >= 0.8:
+                return True
+        
+        return False
+    
     # Sort by area (larger first)
     sorted_boxes = sorted(all_boxes, key=lambda b: b['w'] * b['h'], reverse=True)
     merged = []
     
     for box in sorted_boxes:
         is_duplicate = False
+        
         for existing in merged:
-            if calc_iou(box, existing) > iou_threshold:
-                is_duplicate = True
-                break
+            iou = calc_iou(box, existing)
+            
+            if iou > iou_threshold:
+                # Check hierarchy: should we preserve focal inside structural?
+                if is_focal_in_structural(box, existing):
+                    # Keep the focal box even though it overlaps with structural
+                    is_duplicate = False
+                    break
+                elif is_focal_in_structural(existing, box):
+                    # Existing is focal inside this structural - don't mark as duplicate
+                    is_duplicate = False
+                    continue
+                else:
+                    # Standard NMS: mark as duplicate
+                    is_duplicate = True
+                    break
+        
         if not is_duplicate:
             merged.append(box)
     
@@ -593,31 +656,66 @@ def generate_aoi_image(image: np.ndarray, boxes: list[dict]) -> np.ndarray:
 
 def generate_contrast_map(image: np.ndarray) -> np.ndarray:
     """
-    Compute local pixel variance to highlight areas of high visual complexity.
-    Returns a visualization of the contrast/complexity map.
+    Perceptual Contrast Map using CIE Lab color space.
+    
+    Computes local color distance (ΔE) which better simulates human retinal response
+    to UI element "pop" compared to grayscale variance.
+    
+    Lab space separates:
+    - L: Lightness (0-100)
+    - a: Green-Red axis (-128 to +127)
+    - b: Blue-Yellow axis (-128 to +127)
+    
+    Human perception threshold: ΔE > 2.3 is noticeable
+    
+    Args:
+        image: BGR input image
+        
+    Returns:
+        Perceptual contrast visualization blended with original
     """
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    # Convert BGR -> Lab color space
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
     
-    # Calculate local variance using a sliding window
+    # Split Lab channels
+    L, a, b = cv2.split(lab)
+    
+    # Calculate local mean for each channel
     kernel_size = 15
-    mean = cv2.blur(gray, (kernel_size, kernel_size))
-    sqr_mean = cv2.blur(gray ** 2, (kernel_size, kernel_size))
-    variance = sqr_mean - mean ** 2
+    L_mean = cv2.blur(L, (kernel_size, kernel_size))
+    a_mean = cv2.blur(a, (kernel_size, kernel_size))
+    b_mean = cv2.blur(b, (kernel_size, kernel_size))
     
-    # Normalize variance
-    variance = np.clip(variance, 0, None)
-    if variance.max() > 0:
-        variance = variance / variance.max()
+    # Calculate local variance for each channel
+    L_sqr_mean = cv2.blur(L ** 2, (kernel_size, kernel_size))
+    a_sqr_mean = cv2.blur(a ** 2, (kernel_size, kernel_size))
+    b_sqr_mean = cv2.blur(b ** 2, (kernel_size, kernel_size))
     
-    # Apply colormap (viridis for contrast)
-    variance_colored = cm.viridis(variance)[:, :, :3]
-    variance_colored = (variance_colored * 255).astype(np.uint8)
-    variance_colored = cv2.cvtColor(variance_colored, cv2.COLOR_RGB2BGR)
+    L_var = np.clip(L_sqr_mean - L_mean ** 2, 0, None)
+    a_var = np.clip(a_sqr_mean - a_mean ** 2, 0, None)
+    b_var = np.clip(b_sqr_mean - b_mean ** 2, 0, None)
+    
+    # Perceptual ΔE: Euclidean distance in Lab space
+    # This captures both luminance AND chromatic contrast
+    delta_e = np.sqrt(L_var + a_var + b_var)
+    
+    # Normalize to 0-1 range
+    if delta_e.max() > 0:
+        delta_e = delta_e / delta_e.max()
+    
+    # Apply perceptual threshold curve (boost visible differences)
+    # Human JND (Just Noticeable Difference) is ~2.3 ΔE
+    # Scale so that values above threshold become more prominent
+    delta_e = np.power(delta_e, 0.7)  # Gamma correction for visibility
+    
+    # Apply colormap (viridis: perceptually uniform and colorblind-friendly)
+    contrast_colored = cm.viridis(delta_e)[:, :, :3]
+    contrast_colored = (contrast_colored * 255).astype(np.uint8)
+    contrast_colored = cv2.cvtColor(contrast_colored, cv2.COLOR_RGB2BGR)
     
     # Blend with original
     alpha = 0.5
-    result = cv2.addWeighted(image, 1 - alpha, variance_colored, alpha, 0)
+    result = cv2.addWeighted(image, 1 - alpha, contrast_colored, alpha, 0)
     
     return result
 
@@ -875,19 +973,20 @@ You are auditing a UI based on raw screenshots and new quantitative data provide
 {metrics_context}
 
 ### AUDIT DIRECTIVES
-1. **Metric-Audit Correlation**: 
-   - If Clarity < 60%, focus your "Recommendations" on reducing "Visual Noise" and "Feature Congestion".
+1. **Critical Thinking**: Do not just describe the image. Explain the *impact* of visual choices on users with cognitive disabilities, low vision, or motor impairments.
+2. **Metric-Audit Correlation**: 
+   - If Clarity < 60%, specifically identify which elements are creating "visual noise" (e.g., texture clashes, low-contrast text).
    - If Focus < 50%, identify which non-functional elements are "stealing" saliency from the Primary CTA.
-2. **Sequential Flow**:
-   - Evaluate the Predictive Scanpath. If the user's first 3 fixations do not include the H1 or a primary navigation element, flag it as a "Hierarchy Failure."
-3. **Above the Fold (ATF) Analysis**:
-   - Analyze the Retention Curve. If attention drops by >50% at the first fold, suggest "Scroll Cues" or "Visual Bridges."
+3. **Sequential Flow**:
+   - Evaluate the Predictive Scanpath. Does the H1 or primary navigation appear in the first 3 fixations? If not, explain *why* users are missing it (e.g., "The hero image faces away from the content").
+4. **Cognitive Load**:
+   - Assess if the layout supports "progressive disclosure" or overwhelms the user with too many choices at once.
 
 ### OUTPUT FORMAT
 Generate a comprehensive WCAG 2.2 Accessibility Audit. Use EXACTLY the structure below:
 
 ## Executive Summary
-Write 2-3 sentences summarizing the UI's overall attention health and key accessibility findings.
+Write 2-3 sentences summarizing the UI's attention health and accessibility. focus on the *why*, not just the *what*.
 
 ## Metrics Dashboard
 | Metric | Value | Status |
@@ -900,13 +999,13 @@ Use exactly [PASS], [WARNING], or [FAIL] in the Status column based on the thres
 
 ## Attention & Hierarchy Analysis
 Analyze the scanpath data provided. Address:
-- **Scanpath Flow**: Is the visual hierarchy guiding users correctly?
-- **Hierarchy Issues**: Any failures where key elements are missed?
+- **Scanpath Flow**: Is the visual hierarchy guiding users correctly? Mention specific element ordering.
+- **Cognitive Load**: Is the interface "busy" or "clean"? Does it support quick scanning?
 - **CTA Visibility**: Is the primary call-to-action prominent?
 
 ## WCAG 2.2 Accessibility Audit
 ### Color Contrast (1.4.3, 1.4.6)
-Evaluate text/background contrast. Note any potential issues.
+Evaluate text/background contrast. Note any potential issues with specific color combinations.
 
 ### Text Readability (1.4.4, 1.4.12)
 Assess text sizing, spacing, and legibility.
@@ -914,17 +1013,13 @@ Assess text sizing, spacing, and legibility.
 ### Target Size (2.5.5, 2.5.8)
 Check that interactive elements are large enough for touch/click (minimum 24x24px, ideally 44x44px).
 
-### Focus Indicators (2.4.7, 2.4.11)
-Evaluate if focus states are visible for keyboard navigation.
-
 ## Above-the-Fold & Scroll Analysis
 Based on the retention curve data:
-- How effective is the above-the-fold content?
-- Are there scroll incentives (arrows, partial content)?
-- Suggest visual bridges if attention drops sharply
+- How effective is the above-the-fold content at capturing attention?
+- Are there clear "scent of information" cues (arrows, partial content) to encourage scrolling?
 
 ## Prioritized Recommendations
-List 3-5 actionable recommendations, ordered by priority:
+List 3-5 actionable recommendations, ordered by priority. Use professional UX terminology (e.g., "visual weight", "affordance", "proximity").
 1. **Critical**: [Must fix - blocks users or violates WCAG AA]
 2. **High**: [Should fix - significantly impacts UX]
 3. **Medium**: [Consider fixing - improves experience]
@@ -1325,7 +1420,9 @@ def generate_scanpath_visualization(image: np.ndarray, boxes: list[dict]) -> np.
     return result
 
 
-def generate_scroll_depth_analysis(image: np.ndarray, boxes: list[dict], viewport_height: int = 900) -> dict:
+def generate_scroll_depth_analysis(image: np.ndarray, boxes: list[dict], 
+                                   viewport_height: int = 900,
+                                   saliency_map: np.ndarray = None) -> dict:
     """
     Segment the page into logical "Screens" (Folds) based on viewport height.
     """
@@ -1338,14 +1435,18 @@ def generate_scroll_depth_analysis(image: np.ndarray, boxes: list[dict], viewpor
     # Calculate screen boundaries
     num_screens = int(np.ceil(height / viewport_height))
     
-    # Create attention mask for exact calculation
-    attention_mask = np.zeros((height, width), dtype=np.float32)
-    for box in boxes:
-        x, y, w, h = box['x'], box['y'], box['w'], box['h']
-        attention_mask[y:y+h, x:x+w] += 1.0
-        
-    # Gaussian blur for smoother "attention spread"
-    attention_mask = gaussian_filter(attention_mask, sigma=min(width, height) / 35)
+    if saliency_map is not None:
+        attention_mask = saliency_map
+    else:
+        # Create attention mask from boxes (fallback)
+        attention_mask = np.zeros((height, width), dtype=np.float32)
+        for box in boxes:
+            x, y, w, h = box['x'], box['y'], box['w'], box['h']
+            attention_mask[y:y+h, x:x+w] += 1.0
+            
+        # Gaussian blur for smoother "attention spread"
+        attention_mask = gaussian_filter(attention_mask, sigma=min(width, height) / 35)
+    
     total_attention = attention_mask.sum()
     
     zone_results = []
@@ -1592,7 +1693,12 @@ def run_analysis(image_path: str, output_dir: str = "output",
     
     # Step 7: Scroll depth analysis (Updated with viewport)
     print("Analyzing scroll depth zones...")
-    scroll_analysis = generate_scroll_depth_analysis(image, boxes, viewport_height=viewport_height)
+    scroll_analysis = generate_scroll_depth_analysis(
+        image, 
+        boxes, 
+        viewport_height=viewport_height,
+        saliency_map=attention_mask
+    )
     
     # Step 8.5: Apply Fold Line to ALL images
     print("Applying fold line to all visualizations...")

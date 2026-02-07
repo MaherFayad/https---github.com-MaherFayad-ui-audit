@@ -1,28 +1,30 @@
 """
-EML-NET Hybrid Training Script
-Trains saliency model on combined Silicon + Ueyes datasets.
+EML-NET Hybrid Training Script v2
+Trains saliency model on combined datasets with improved loss functions.
 
-Optimized for:
-- NVIDIA RTX 5060 Ti (8GB VRAM)
-- BFloat16 mixed precision
-- Gradient accumulation (effective batch size 32)
+Improvements:
+- Hybrid multi-objective loss: KL_Div + CC + NSS + MSE
+- Multi-scale training support
+- Automatic Mixed Precision (AMP) with GradScaler
 
 Usage:
     python train_hybrid.py
     python train_hybrid.py --epochs 5 --dry-run
 
-Author: Generated for EML-NET Hybrid Training Pipeline
+Author: Refactored for UX-Heatmap v2
 """
 
 import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -41,6 +43,12 @@ EPOCHS = 10
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-5
 
+# Loss weights (tuned for UI saliency)
+ALPHA_KL = 1.0    # KL Divergence - distribution alignment (primary)
+BETA_CC = 0.3     # Correlation Coefficient - global pattern
+GAMMA_NSS = 0.5   # Normalized Scanpath Saliency - fixation accuracy
+DELTA_MSE = 0.1   # Mean Squared Error - pixel smoothness
+
 # Paths (relative to project root)
 SILICON_ROOT = "models/Datasets/Silicon"
 UEYES_ROOT = "models/Datasets/Ueyes"
@@ -52,69 +60,160 @@ MODEL_SAVE_PATH = "models/eml_net_hybrid.pth"
 # Device configuration
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
-    USE_BFLOAT16 = torch.cuda.is_bf16_supported()
+    USE_AMP = True  # Use Automatic Mixed Precision
     print(f"Device: {DEVICE} ({torch.cuda.get_device_name(0)})")
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    print(f"BFloat16 supported: {USE_BFLOAT16}")
+    print(f"AMP Enabled: {USE_AMP}")
 else:
     DEVICE = torch.device("cpu")
-    USE_BFLOAT16 = False
+    USE_AMP = False
     print(f"Device: {DEVICE} (CPU fallback)")
-
 
 
 # =============================================================================
 # Loss Functions
 # =============================================================================
 
-def cc_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def kl_divergence_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    KL Divergence Loss for saliency maps.
+    
+    Treats both maps as probability distributions and measures how the predicted
+    distribution diverges from the ground truth.
+    
+    Formula: KL(P||Q) = Σ P(x) * log(P(x) / Q(x))
+    
+    Args:
+        pred: Predicted saliency map (B, 1, H, W), should be in [0, 1]
+        target: Ground truth saliency map (B, 1, H, W)
+        eps: Small value for numerical stability
+        
+    Returns:
+        Scalar KL divergence loss (averaged over batch)
+    """
+    # Flatten spatial dimensions
+    pred_flat = pred.flatten(start_dim=1)    # (B, H*W)
+    target_flat = target.flatten(start_dim=1)  # (B, H*W)
+    
+    # Normalize to probability distributions (sum to 1)
+    pred_dist = pred_flat / (pred_flat.sum(dim=1, keepdim=True) + eps)
+    target_dist = target_flat / (target_flat.sum(dim=1, keepdim=True) + eps)
+    
+    # KL Divergence: P * log(P / Q) = P * (log(P) - log(Q))
+    # We compute: target * log(target / pred)
+    kl = target_dist * (torch.log(target_dist + eps) - torch.log(pred_dist + eps))
+    
+    # Sum over spatial dimension, mean over batch
+    return kl.sum(dim=1).mean()
+
+
+def cc_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
     Correlation Coefficient (CC) Loss.
     
-    Measures the linear correlation between predicted and ground truth saliency maps.
-    Returns negative CC so minimizing loss = maximizing correlation.
+    Measures linear correlation between predicted and ground truth saliency.
+    Returns 1 - CC so that minimizing loss = maximizing correlation.
+    
+    Formula: CC = cov(P, Q) / (σ_P * σ_Q)
     
     Args:
         pred: Predicted saliency map (B, 1, H, W)
         target: Ground truth saliency map (B, 1, H, W)
-    
+        
     Returns:
-        Scalar loss (negative CC, averaged over batch)
+        Scalar loss (1 - CC, averaged over batch)
     """
     # Flatten spatial dimensions
-    pred_flat = pred.flatten(start_dim=1)  # (B, H*W)
-    target_flat = target.flatten(start_dim=1)  # (B, H*W)
+    pred_flat = pred.flatten(start_dim=1)
+    target_flat = target.flatten(start_dim=1)
     
-    # Center the data (subtract mean)
+    # Center the data
     pred_mean = pred_flat.mean(dim=1, keepdim=True)
     target_mean = target_flat.mean(dim=1, keepdim=True)
     pred_centered = pred_flat - pred_mean
     target_centered = target_flat - target_mean
     
-    # Compute covariance (numerator)
+    # Compute covariance and standard deviations
+    n = pred_flat.size(1)
     covariance = (pred_centered * target_centered).sum(dim=1)
-    
-    # Compute standard deviations
-    pred_std = pred_centered.std(dim=1) + 1e-8
-    target_std = target_centered.std(dim=1) + 1e-8
+    pred_std = torch.sqrt((pred_centered ** 2).sum(dim=1) + eps)
+    target_std = torch.sqrt((target_centered ** 2).sum(dim=1) + eps)
     
     # Correlation coefficient
-    cc = covariance / (pred_std * target_std * pred_flat.size(1))
+    cc = covariance / (pred_std * target_std + eps)
     
-    # Return negative mean (we want to maximize CC, so minimize -CC)
-    return -cc.mean()
+    # Return 1 - CC (want to maximize CC)
+    return (1 - cc).mean()
 
 
-def combined_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def nss_loss(pred: torch.Tensor, target: torch.Tensor, 
+             threshold: float = 0.5, eps: float = 1e-8) -> torch.Tensor:
     """
-    Combined loss: CC + MSE for stable training.
+    Normalized Scanpath Saliency (NSS) Loss.
     
-    CC is scale-invariant but can be unstable early in training.
-    MSE provides gradient stability.
+    Measures saliency values at fixation locations (high values in ground truth).
+    Higher NSS = better prediction at actual fixation points.
+    
+    Formula: NSS = mean((P[fixations] - μ_P) / σ_P)
+    
+    Args:
+        pred: Predicted saliency map (B, 1, H, W)
+        target: Ground truth map (B, 1, H, W), values > threshold are fixations
+        threshold: Threshold to identify fixation locations
+        
+    Returns:
+        Scalar loss (-NSS, averaged over batch)
     """
-    cc = cc_loss(pred, target)
-    mse = nn.functional.mse_loss(pred, target)
-    return cc + 0.1 * mse
+    # Flatten
+    pred_flat = pred.flatten(start_dim=1)
+    target_flat = target.flatten(start_dim=1)
+    
+    # Normalize predictions (z-score)
+    pred_mean = pred_flat.mean(dim=1, keepdim=True)
+    pred_std = pred_flat.std(dim=1, keepdim=True) + eps
+    pred_norm = (pred_flat - pred_mean) / pred_std
+    
+    # Create fixation mask (binary: where target > threshold)
+    fixation_mask = (target_flat > threshold).float()
+    
+    # Compute NSS: mean of normalized prediction at fixation locations
+    # Weighted mean using fixation mask
+    nss = (pred_norm * fixation_mask).sum(dim=1) / (fixation_mask.sum(dim=1) + eps)
+    
+    # Return negative (minimize -NSS = maximize NSS)
+    return -nss.mean()
+
+
+def hybrid_loss(pred: torch.Tensor, target: torch.Tensor,
+                alpha: float = ALPHA_KL, beta: float = BETA_CC,
+                gamma: float = GAMMA_NSS, delta: float = DELTA_MSE) -> Tuple[torch.Tensor, dict]:
+    """
+    Combined hybrid loss for saliency prediction.
+    
+    L = α*KL_Div + β*(1-CC) + γ*(-NSS) + δ*MSE
+    
+    Args:
+        pred: Predicted saliency (B, 1, H, W), should be sigmoid-activated
+        target: Ground truth saliency (B, 1, H, W)
+        alpha, beta, gamma, delta: Loss weights
+        
+    Returns:
+        Tuple of (total_loss, dict of individual losses for logging)
+    """
+    loss_kl = kl_divergence_loss(pred, target)
+    loss_cc = cc_loss(pred, target)
+    loss_nss = nss_loss(pred, target)
+    loss_mse = F.mse_loss(pred, target)
+    
+    total = alpha * loss_kl + beta * loss_cc + gamma * loss_nss + delta * loss_mse
+    
+    return total, {
+        'kl': loss_kl.item(),
+        'cc': loss_cc.item(),
+        'nss': loss_nss.item(),
+        'mse': loss_mse.item(),
+        'total': total.item()
+    }
 
 
 # =============================================================================
@@ -125,119 +224,124 @@ def train_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
-    scaler: Optional[torch.amp.GradScaler],
+    scaler: Optional[GradScaler],
     epoch: int,
     accumulation_steps: int = 4,
-    use_bf16: bool = True
-) -> float:
+    use_amp: bool = True
+) -> Tuple[float, dict]:
     """
-    Train for one epoch with gradient accumulation.
-    
-    Args:
-        model: EMLNet model
-        dataloader: Training data loader
-        optimizer: Optimizer
-        scaler: GradScaler for mixed precision (not needed for bf16)
-        epoch: Current epoch number
-        accumulation_steps: Number of steps to accumulate gradients
-        use_bf16: Whether to use BFloat16
+    Train for one epoch with gradient accumulation and AMP.
     
     Returns:
-        Average loss for the epoch
+        Tuple of (average loss, dict of individual losses)
     """
     model.train()
     total_loss = 0.0
     num_batches = 0
+    loss_accum = {'kl': 0, 'cc': 0, 'nss': 0, 'mse': 0}
     
     optimizer.zero_grad()
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}", leave=True)
     
     for batch_idx, (images, maps, _labels) in enumerate(pbar):
-        # Move to device
         images = images.to(DEVICE, non_blocking=True)
         maps = maps.to(DEVICE, non_blocking=True)
         
-        # Forward pass with autocast
-        if use_bf16 and DEVICE.type == 'cuda':
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+        # Forward pass with AMP
+        if use_amp and DEVICE.type == 'cuda':
+            with autocast('cuda'):
                 outputs = model(images)
-                # Apply sigmoid to get [0, 1] range
                 outputs = torch.sigmoid(outputs)
-                loss = combined_loss(outputs, maps)
-                loss = loss / accumulation_steps  # Scale for accumulation
+                loss, loss_dict = hybrid_loss(outputs, maps)
+                loss = loss / accumulation_steps
         else:
             outputs = model(images)
             outputs = torch.sigmoid(outputs)
-            loss = combined_loss(outputs, maps)
+            loss, loss_dict = hybrid_loss(outputs, maps)
             loss = loss / accumulation_steps
         
-        # Backward pass
-        loss.backward()
+        # Backward pass with scaler
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         
         # Gradient accumulation step
         if (batch_idx + 1) % accumulation_steps == 0:
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
             optimizer.zero_grad()
         
-        # Track loss (unscaled)
-        total_loss += loss.item() * accumulation_steps
+        # Track losses
+        total_loss += loss_dict['total']
+        for k in loss_accum:
+            loss_accum[k] += loss_dict[k]
         num_batches += 1
         
         # Update progress bar
         avg_loss = total_loss / num_batches
-        pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
+        pbar.set_postfix({
+            'loss': f'{avg_loss:.4f}',
+            'kl': f'{loss_accum["kl"]/num_batches:.3f}',
+            'cc': f'{loss_accum["cc"]/num_batches:.3f}'
+        })
     
     # Handle remaining gradients
     if num_batches % accumulation_steps != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
         optimizer.zero_grad()
     
-    return total_loss / max(num_batches, 1)
+    avg_losses = {k: v / max(num_batches, 1) for k, v in loss_accum.items()}
+    return total_loss / max(num_batches, 1), avg_losses
 
 
 def validate(
     model: nn.Module,
     dataloader: DataLoader,
-    use_bf16: bool = True
-) -> float:
-    """
-    Validate the model.
-    
-    Args:
-        model: EMLNet model
-        dataloader: Validation data loader
-        use_bf16: Whether to use BFloat16
-    
-    Returns:
-        Average validation loss
-    """
+    use_amp: bool = True
+) -> Tuple[float, dict]:
+    """Validate the model."""
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    loss_accum = {'kl': 0, 'cc': 0, 'nss': 0, 'mse': 0}
     
     with torch.no_grad():
         for images, maps, _labels in tqdm(dataloader, desc="Validating", leave=False):
             images = images.to(DEVICE, non_blocking=True)
             maps = maps.to(DEVICE, non_blocking=True)
             
-            if use_bf16 and DEVICE.type == 'cuda':
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            if use_amp and DEVICE.type == 'cuda':
+                with autocast('cuda'):
                     outputs = model(images)
                     outputs = torch.sigmoid(outputs)
-                    loss = combined_loss(outputs, maps)
+                    loss, loss_dict = hybrid_loss(outputs, maps)
             else:
                 outputs = model(images)
                 outputs = torch.sigmoid(outputs)
-                loss = combined_loss(outputs, maps)
+                loss, loss_dict = hybrid_loss(outputs, maps)
             
-            total_loss += loss.item()
+            total_loss += loss_dict['total']
+            for k in loss_accum:
+                loss_accum[k] += loss_dict[k]
             num_batches += 1
     
-    return total_loss / max(num_batches, 1)
+    avg_losses = {k: v / max(num_batches, 1) for k, v in loss_accum.items()}
+    return total_loss / max(num_batches, 1), avg_losses
 
 
 # =============================================================================
@@ -247,7 +351,7 @@ def validate(
 def main(args):
     """Main training function."""
     print("=" * 60)
-    print("EML-NET Hybrid Saliency Model Training")
+    print("EML-NET v2 Hybrid Saliency Model Training")
     print("=" * 60)
     
     # Device info
@@ -255,14 +359,16 @@ def main(args):
     if DEVICE.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-        print(f"BFloat16 Support: {USE_BFLOAT16}")
+        print(f"AMP Enabled: {USE_AMP}")
+    
+    print(f"\nLoss Weights: KL={ALPHA_KL}, CC={BETA_CC}, NSS={GAMMA_NSS}, MSE={DELTA_MSE}")
     
     # ==========================================================================
     # Load Datasets
     # ==========================================================================
     print(f"\n[1/4] Loading Datasets...")
     
-    # filter roots based on --dataset flag
+    # Filter roots based on --dataset flag
     s_root = SILICON_ROOT if args.dataset in ['all', 'silicon'] else None
     u_root = UEYES_ROOT if args.dataset in ['all', 'ueyes'] else None
     m_root = MASSVIS_ROOT if args.dataset in ['all', 'massvis'] else None
@@ -277,7 +383,6 @@ def main(args):
         salchart_root=sc_root,
         split='train'
     )
-    # Note: SALchart is currently stubbed in loader, but we can pass it if we add support
     
     val_dataset = HybridDataset(
         silicon_root=s_root,
@@ -316,7 +421,7 @@ def main(args):
     # ==========================================================================
     # Initialize Model
     # ==========================================================================
-    print(f"\n[2/4] Initializing EMLNet model...")
+    print(f"\n[2/4] Initializing EMLNet v2 (EfficientNet-V2 + FPN)...")
     
     model = EMLNet()
     model = model.to(DEVICE)
@@ -343,15 +448,15 @@ def main(args):
         weight_decay=WEIGHT_DECAY
     )
     
-    # Learning rate scheduler (cosine annealing)
+    # Learning rate scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=args.epochs,
         eta_min=LEARNING_RATE * 0.01
     )
     
-    # GradScaler not needed for BFloat16 (native support)
-    scaler = None
+    # GradScaler for AMP
+    scaler = GradScaler() if USE_AMP else None
     
     # Tracking best model
     best_val_loss = float('inf')
@@ -367,20 +472,24 @@ def main(args):
     
     for epoch in range(args.epochs):
         # Train
-        train_loss = train_one_epoch(
+        train_loss, train_losses = train_one_epoch(
             model=model,
             dataloader=train_loader,
             optimizer=optimizer,
             scaler=scaler,
             epoch=epoch,
             accumulation_steps=ACCUMULATION_STEPS,
-            use_bf16=USE_BFLOAT16
+            use_amp=USE_AMP
         )
         
         # Validate
         if val_loader is not None:
-            val_loss = validate(model, val_loader, use_bf16=USE_BFLOAT16)
-            print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            val_loss, val_losses = validate(model, val_loader, use_amp=USE_AMP)
+            print(f"Epoch {epoch+1}/{args.epochs}")
+            print(f"  Train - Total: {train_loss:.4f} | KL: {train_losses['kl']:.4f} | "
+                  f"CC: {train_losses['cc']:.4f} | NSS: {train_losses['nss']:.4f}")
+            print(f"  Val   - Total: {val_loss:.4f} | KL: {val_losses['kl']:.4f} | "
+                  f"CC: {val_losses['cc']:.4f} | NSS: {val_losses['nss']:.4f}")
             
             # Save best model
             if val_loss < best_val_loss:
@@ -392,11 +501,16 @@ def main(args):
                     'optimizer_state_dict': optimizer.state_dict(),
                     'train_loss': train_loss,
                     'val_loss': val_loss,
+                    'loss_weights': {
+                        'alpha_kl': ALPHA_KL,
+                        'beta_cc': BETA_CC,
+                        'gamma_nss': GAMMA_NSS,
+                        'delta_mse': DELTA_MSE
+                    }
                 }, MODEL_SAVE_PATH)
                 print(f"  -> Saved best model (val_loss: {val_loss:.4f})")
         else:
             print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}")
-            # Save latest model if no validation
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -424,11 +538,13 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train EML-NET Hybrid Saliency Model")
+    parser = argparse.ArgumentParser(description="Train EML-NET v2 Hybrid Saliency Model")
     parser.add_argument('--epochs', type=int, default=EPOCHS, help=f"Number of epochs (default: {EPOCHS})")
     parser.add_argument('--dry-run', action='store_true', help="Run only 1 epoch for testing")
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE, help=f"Batch size (default: {BATCH_SIZE})")
-    parser.add_argument('--dataset', type=str, default='all', choices=['all', 'silicon', 'ueyes', 'massvis', 'mobile', 'salchart'], help="Specific dataset to train on")
+    parser.add_argument('--dataset', type=str, default='all', 
+                        choices=['all', 'silicon', 'ueyes', 'massvis', 'mobile', 'salchart'], 
+                        help="Specific dataset to train on")
     
     args = parser.parse_args()
     
