@@ -496,78 +496,67 @@ def get_saliency_map(image: np.ndarray, boxes: list[dict], viewport_height: int 
 def generate_attention_heatmap(image: np.ndarray, boxes: list[dict], 
                               saliency_map: np.ndarray = None) -> np.ndarray:
     """
-    Generate a high-contrast attention heatmap with concentrated hotspots.
+    Generate an attention heatmap with EML-NET as the primary signal.
     
-    Produces visually "violent" peaks (bright red/yellow) on high-attention
-    regions and dark/transparent cold zones between them, matching the style
-    of professional eye-tracking tools like Attention Insight.
+    Architecture:
+    - PRIMARY: EML-NET saliency (light sigma-20 blur to smooth tile seams)
+    - BOOST: OmniParser boxes as a multiplicative amplifier on saliency peaks
+    - POST: Percentile contrast stretch + gamma for natural Attention-Insight style
     
-    Layers:
-    1. Sharp UI (sigma 15): tight Gaussian blobs from OmniParser boxes,
-       weighted by EML-NET saliency so only salient elements glow.
-    2. Broad Context (sigma 30): lightly smoothed EML-NET saliency for
-       environmental glow around high-attention zones.
-    3. Fusion: 55% sharp + 45% broad.
-    4. Floor removal + aggressive gamma to kill the diffuse wash and
-       make peaks pop hard.
+    EML-NET drives WHERE attention goes. OmniParser boxes reinforce HOW MUCH
+    attention those UI regions get (faces, CTAs, headings get brighter).
     """
     height, width = image.shape[:2]
     
-    # --- Layer A: Sharp UI Precision ---
-    sharp_mask = np.zeros((height, width), dtype=np.float32)
+    # ---- Primary signal: EML-NET saliency ----
+    if saliency_map is not None:
+        saliency_layer = gaussian_filter(saliency_map.astype(np.float32), sigma=20)
+    else:
+        saliency_layer = np.zeros((height, width), dtype=np.float32)
+    
+    # ---- Secondary: OmniParser box boost mask ----
+    box_mask = np.zeros((height, width), dtype=np.float32)
     for box in boxes:
         bx, by, bw, bh = box['x'], box['y'], box['w'], box['h']
-        weight = 1.0
-        if saliency_map is not None:
-            roi = saliency_map[max(0,by):min(height,by+bh), max(0,bx):min(width,bx+bw)]
-            if roi.size > 0:
-                weight = float(np.mean(roi))
-                weight = weight ** 0.6  # compress dynamic range so mid-saliency boxes still contribute
-            else:
-                weight = 0.3
-            
-        sharp_mask[max(0,by):min(height,by+bh), max(0,bx):min(width,bx+bw)] += weight
+        y1, y2 = max(0, by), min(height, by + bh)
+        x1, x2 = max(0, bx), min(width, bx + bw)
+        if y2 > y1 and x2 > x1:
+            box_mask[y1:y2, x1:x2] += 1.0
         
-    sharp_layer = gaussian_filter(sharp_mask, sigma=15)
-    if sharp_layer.max() > 0:
-        sharp_layer /= sharp_layer.max()
-
-    # --- Layer B: Broad Context ---
-    if saliency_map is not None:
-        broad_layer = saliency_map.copy()
+    box_boost = gaussian_filter(box_mask, sigma=25)
+    if box_boost.max() > 0:
+        box_boost /= box_boost.max()
+    
+    # ---- Combine: saliency drives, boxes amplify ----
+    if saliency_layer.max() > 0:
+        combined = saliency_layer * (1.0 + box_boost * 0.4)
     else:
-        broad_layer = gaussian_filter(sharp_mask, sigma=40)
-        
-    broad_layer = gaussian_filter(broad_layer, sigma=30)
-    if broad_layer.max() > 0:
-        broad_layer /= broad_layer.max()
+        combined = box_boost
     
-    # --- Fusion ---
-    combined_heatmap = (sharp_layer * 0.55) + (broad_layer * 0.45)
+    # ---- Percentile contrast stretch ----
+    # Map the 98th percentile to 1.0 so faintly warm areas become clearly
+    # visible instead of being crushed near zero.
+    p98 = np.percentile(combined, 98)
+    if p98 > 1e-6:
+        combined = np.clip(combined / p98, 0, 1)
+    elif combined.max() > 0:
+        combined /= combined.max()
     
-    if combined_heatmap.max() > 0:
-        combined_heatmap /= combined_heatmap.max()
+    # Subtle floor removal (10th percentile) to clean up ambient noise
+    floor = np.percentile(combined, 10)
+    combined = np.clip((combined - floor) / max(1.0 - floor, 1e-6), 0, 1)
     
-    # --- Kill the diffuse wash ---
-    # Remove the noise floor so low-attention areas are truly cold/dark.
-    # The 40th percentile threshold eliminates the ambient glow from
-    # hero bias blending and over-smoothed saliency tails.
-    floor = np.percentile(combined_heatmap, 40)
-    combined_heatmap = np.clip((combined_heatmap - floor) / max(1.0 - floor, 1e-6), 0, 1)
+    # Gamma 2.0: peaks pop red/yellow, mid-tones stay green/teal
+    combined = np.power(combined, 2.0)
     
-    # Aggressive gamma: crush mid-tones, only true peaks survive as hot
-    combined_heatmap = np.power(combined_heatmap, 3.0)
+    if combined.max() > 0:
+        combined /= combined.max()
     
-    # Re-normalize after gamma so the hottest spot reaches 1.0
-    if combined_heatmap.max() > 0:
-        combined_heatmap /= combined_heatmap.max()
-    
-    # Apply colormap (jet)
-    heatmap_colored = cm.jet(combined_heatmap)[:, :, :3]
+    # Apply JET colormap
+    heatmap_colored = cm.jet(combined)[:, :, :3]
     heatmap_colored = (heatmap_colored * 255).astype(np.uint8)
     heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_RGB2BGR)
     
-    # Blend: higher alpha to make the heatmap more vivid against the image
     alpha = 0.55
     result = cv2.addWeighted(image, 1 - alpha, heatmap_colored, alpha, 0)
     

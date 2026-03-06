@@ -8,6 +8,8 @@ requests
 playwright
 google-genai
 python-dotenv
+flask
+flask-cors
 
 --index-url https://download.pytorch.org/whl/nightly/cu128
 torch

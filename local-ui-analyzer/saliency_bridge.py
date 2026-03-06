@@ -281,8 +281,10 @@ class SaliencyEngine:
         # Resize back to original tile size
         saliency_map = cv2.resize(saliency_map, (w, h), interpolation=cv2.INTER_LANCZOS4)
         
-        # Normalize locally
-        saliency_map = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
+        # No per-tile normalization — sigmoid already bounds output to 0-1.
+        # Normalizing each tile independently destroys relative intensity
+        # across page folds (a dull tile's max becomes 1.0, matching a
+        # high-attention tile). Single final normalization happens in predict().
         
         return saliency_map.astype(np.float32)
 
