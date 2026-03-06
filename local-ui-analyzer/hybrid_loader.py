@@ -81,6 +81,9 @@ class HybridDataset(Dataset):
     UEYES_LABEL = 1
     MASSVIS_LABEL = 2
     FIWI_LABEL = 3
+    STONYBROOK_LABEL = 4
+    ISUN_LABEL = 5
+    MOUSE_LABEL = 6
     
     def __init__(
         self,
@@ -89,6 +92,9 @@ class HybridDataset(Dataset):
         massvis_root: Optional[str] = None,
         fiwi_root: Optional[str] = None,
         salchart_root: Optional[str] = None,
+        stonybrook_root: Optional[str] = None,
+        isun_root: Optional[str] = None,
+        mouse_root: Optional[str] = None,
         split: str = 'train',
         transform: Optional[A.Compose] = None
     ):
@@ -97,6 +103,9 @@ class HybridDataset(Dataset):
         self.massvis_root = Path(massvis_root) if massvis_root else None
         self.fiwi_root = Path(fiwi_root) if fiwi_root else None
         self.salchart_root = Path(salchart_root) if salchart_root else None
+        self.stonybrook_root = Path(stonybrook_root) if stonybrook_root else None
+        self.isun_root = Path(isun_root) if isun_root else None
+        self.mouse_root = Path(mouse_root) if mouse_root else None
         
         self.split = split
         self.transform = transform or get_transforms(is_train=(split == 'train'))
@@ -109,6 +118,9 @@ class HybridDataset(Dataset):
         self.massvis_count = 0
         self.fiwi_count = 0
         self.salchart_count = 0
+        self.stonybrook_count = 0
+        self.isun_count = 0
+        self.mouse_count = 0
         
         # Load samples
         if self.silicon_root: self._load_silicon_samples()
@@ -116,9 +128,13 @@ class HybridDataset(Dataset):
         if self.massvis_root: self._load_massvis_samples()
         if self.fiwi_root: self._load_mobile_ui_samples()
         if self.salchart_root: self._load_salchart_samples()
+        if self.stonybrook_root: self._load_stonybrook_samples()
+        if self.isun_root: self._load_isun_samples()
+        if self.mouse_root: self._load_mouse_samples()
         
         print(f"[HybridDataset] Loaded: Silicon={self.silicon_count}, Ueyes={self.ueyes_count}, "
-              f"MassVis={self.massvis_count}, FiWI={self.fiwi_count}, SalChart={self.salchart_count}. Total={len(self.samples)}")
+              f"MassVis={self.massvis_count}, FiWI={self.fiwi_count}, SalChart={self.salchart_count}, "
+              f"Stonybrook={self.stonybrook_count}, iSUN={self.isun_count}, Mouse={self.mouse_count}. Total={len(self.samples)}")
 
     def _load_silicon_samples(self):
         """Load samples from Silicon dataset (nested train/val structure)."""
@@ -238,6 +254,194 @@ class HybridDataset(Dataset):
         self.fiwi_count = count
         print(f"[Mobile UI] Loaded {count} samples")
 
+    def _load_stonybrook_samples(self):
+        """Load Stonybrook Web Saliency samples.
+        
+        Structure:
+            stonybrook/orig_websaliency_all/ - stimulus images (*.png)
+            stonybrook/fdm_websaliency/      - fixation density maps (*.png)
+            stonybrook/eyemaps_websaliency/  - eye fixation maps (*.png)
+        
+        We pair orig_websaliency_all (stimuli) with fdm_websaliency (saliency maps).
+        """
+        print("[HybridDataset] Scanning Stonybrook dataset...")
+        if not self.stonybrook_root:
+            return
+
+        images_dir = self.stonybrook_root / "orig_websaliency_all"
+        maps_dir = self.stonybrook_root / "fdm_websaliency"
+        
+        if not images_dir.exists() or not maps_dir.exists():
+            warnings.warn(f"Stonybrook folders not found: {images_dir} or {maps_dir}")
+            return
+        
+        # Build map lookup (filenames match between stimulus and fdm)
+        map_lookup = {}
+        for map_file in maps_dir.iterdir():
+            if map_file.is_file() and map_file.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                map_lookup[map_file.stem.lower()] = map_file
+        
+        # Split: use 80% for train, 20% for val (sorted for reproducibility)
+        all_images = sorted([
+            f for f in images_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in ['.png', '.jpg', '.jpeg']
+        ])
+        
+        split_idx = int(len(all_images) * 0.8)
+        if self.split == 'train':
+            selected_images = all_images[:split_idx]
+        elif self.split == 'val':
+            selected_images = all_images[split_idx:]
+        else:  # 'all'
+            selected_images = all_images
+        
+        count = 0
+        for img_file in selected_images:
+            basename = img_file.stem.lower()
+            if basename in map_lookup:
+                self.samples.append((img_file, map_lookup[basename], self.STONYBROOK_LABEL))
+                count += 1
+        
+        self.stonybrook_count = count
+        print(f"[Stonybrook] Loaded {count} samples ({self.split})")
+
+    def _load_isun_samples(self):
+        """Load iSUN-OOD samples with center-bias Gaussian pseudo-saliency.
+        
+        iSUN is a natural image dataset without saliency annotations.
+        We generate center-bias Gaussian maps as pseudo-ground-truth so
+        the model sees diverse natural scenes during training.
+        """
+        print("[HybridDataset] Scanning iSUN-OOD dataset...")
+        if not self.isun_root:
+            return
+
+        images_dir = self.isun_root / "images"
+        
+        if not images_dir.exists():
+            warnings.warn(f"iSUN images folder not found: {images_dir}")
+            return
+        
+        # Generate center-bias Gaussian map and save it once
+        pseudo_map_dir = self.isun_root / "pseudo_saliency_maps"
+        pseudo_map_dir.mkdir(exist_ok=True)
+        
+        center_map_path = pseudo_map_dir / "center_bias.png"
+        if not center_map_path.exists():
+            # Create a center-bias Gaussian saliency map
+            h, w = TARGET_HEIGHT, TARGET_WIDTH
+            y, x = np.mgrid[0:h, 0:w]
+            cy, cx = h / 2.0, w / 2.0
+            sigma_y, sigma_x = h / 4.0, w / 4.0
+            gaussian = np.exp(-((x - cx)**2 / (2 * sigma_x**2) + (y - cy)**2 / (2 * sigma_y**2)))
+            gaussian = (gaussian / gaussian.max() * 255).astype(np.uint8)
+            Image.fromarray(gaussian, mode='L').save(center_map_path)
+            print(f"[iSUN] Created center-bias pseudo-saliency map at {center_map_path}")
+        
+        # Collect all images
+        all_images = sorted([
+            f for f in images_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in ['.png', '.jpg', '.jpeg']
+        ])
+        
+        # Split: 80% train, 20% val
+        split_idx = int(len(all_images) * 0.8)
+        if self.split == 'train':
+            selected_images = all_images[:split_idx]
+        elif self.split == 'val':
+            selected_images = all_images[split_idx:]
+        else:  # 'all'
+            selected_images = all_images
+        
+        count = 0
+        for img_file in selected_images:
+            # All iSUN images use the same center-bias map
+            self.samples.append((img_file, center_map_path, self.ISUN_LABEL))
+            count += 1
+        
+        self.isun_count = count
+        print(f"[iSUN] Loaded {count} samples ({self.split})")
+
+    def _load_mouse_samples(self):
+        """Extracts sessions from mouse.parquet and creates pseudo-saliency heatmaps."""
+        print("[HybridDataset] Scanning Mouse Movement dataset...")
+        if not self.mouse_root: return
+        
+        parquet_file = self.mouse_root / "mouse.parquet"
+        if not parquet_file.exists():
+            warnings.warn(f"Mouse parquet not found: {parquet_file}")
+            return
+            
+        pseudo_map_dir = self.mouse_root / "pseudo_saliency_maps"
+        pseudo_map_dir.mkdir(exist_ok=True)
+        
+        generated_maps = list(pseudo_map_dir.glob("*.png"))
+        if len(generated_maps) > 0:
+            print(f"[Mouse Dataset] Using {len(generated_maps)} pre-generated heatmaps.")
+        else:
+            print("[Mouse Dataset] Generating heatmaps from parquet...")
+            try:
+                import pandas as pd
+                df = pd.read_parquet(parquet_file)
+                sessions = df.groupby('session_id')
+                
+                count = 0
+                for session_id, group in sessions:
+                    if count >= 300: break # Limiting for processing speed
+                    
+                    h, w = TARGET_HEIGHT, TARGET_WIDTH
+                    heatmap = np.zeros((h, w), dtype=np.float32)
+                    
+                    for _, row in group.iterrows():
+                        x, y = row.get('x'), row.get('y')
+                        if pd.notnull(x) and pd.notnull(y):
+                            sw = row.get('screen_width', 1920)
+                            sh = row.get('screen_height', 1080)
+                            if pd.isnull(sw) or sw == 0: sw = 1920
+                            if pd.isnull(sh) or sh == 0: sh = 1080
+                            
+                            mx = int((x / sw) * w)
+                            my = int((y / sh) * h)
+                            
+                            if 0 <= mx < w and 0 <= my < h:
+                                heatmap[my, mx] += 1.0
+                    
+                    if heatmap.sum() > 0:
+                        from scipy.ndimage import gaussian_filter
+                        heatmap = gaussian_filter(heatmap, sigma=15)
+                        heatmap = (heatmap / heatmap.max() * 255).astype(np.uint8)
+                        
+                        out_path = pseudo_map_dir / f"{session_id}.png"
+                        Image.fromarray(heatmap, mode='L').save(out_path)
+                        count += 1
+                
+                generated_maps = list(pseudo_map_dir.glob("*.png"))
+            except Exception as e:
+                warnings.warn(f"Failed to parse parquet: {e}")
+                return
+                
+        blank_stimulus_path = self.mouse_root / "blank_stimulus.png"
+        if not blank_stimulus_path.exists():
+            blank = np.ones((TARGET_HEIGHT, TARGET_WIDTH, 3), dtype=np.uint8) * 128
+            Image.fromarray(blank).save(blank_stimulus_path)
+            
+        all_maps = sorted(generated_maps)
+        split_idx = int(len(all_maps) * 0.8)
+        if self.split == 'train':
+            selected_maps = all_maps[:split_idx]
+        elif self.split == 'val':
+            selected_maps = all_maps[split_idx:]
+        else:
+            selected_maps = all_maps
+            
+        count = 0
+        for map_file in selected_maps:
+            self.samples.append((blank_stimulus_path, map_file, self.MOUSE_LABEL))
+            count += 1
+            
+        self.mouse_count = count
+        print(f"[Mouse Dataset] Loaded {count} samples ({self.split})")
+
     def __len__(self) -> int:
         return len(self.samples)
     
@@ -271,7 +475,10 @@ def get_balanced_sampler(dataset: HybridDataset) -> WeightedRandomSampler:
         HybridDataset.SILICON_LABEL: dataset.silicon_count,
         HybridDataset.UEYES_LABEL: dataset.ueyes_count,
         HybridDataset.MASSVIS_LABEL: dataset.massvis_count,
-        HybridDataset.FIWI_LABEL: dataset.fiwi_count
+        HybridDataset.FIWI_LABEL: dataset.fiwi_count,
+        HybridDataset.STONYBROOK_LABEL: dataset.stonybrook_count,
+        HybridDataset.ISUN_LABEL: dataset.isun_count,
+        HybridDataset.MOUSE_LABEL: dataset.mouse_count,
     }
     
     # Calculate weight for each class: 1.0 / count
@@ -290,7 +497,7 @@ def get_balanced_sampler(dataset: HybridDataset) -> WeightedRandomSampler:
     # Assign weights
     sample_weights = []
     for _, _, label in dataset.samples:
-        sample_weights.append(weights_map[label])
+        sample_weights.append(weights_map.get(label, 0.0))
     
     sample_weights = torch.tensor(sample_weights, dtype=torch.float64)
     
@@ -314,6 +521,9 @@ if __name__ == "__main__":
         ueyes_root="models/Datasets/Ueyes",
         massvis_root="models/Datasets/massvis",
         fiwi_root="models/Datasets/mobile ui salency",
-        salchart_root="models/Datasets/SALchart QA"
+        salchart_root="models/Datasets/SALchart QA",
+        stonybrook_root="models/Datasets/stonybrook",
+        isun_root="models/Datasets/isun-ood",
+        mouse_root="models/Datasets/mouse_movement"
     )
     print(f"Total loaded: {len(dataset)}")

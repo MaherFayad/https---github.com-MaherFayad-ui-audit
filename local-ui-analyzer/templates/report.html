@@ -714,10 +714,13 @@
                 <button class="tab-trigger" data-panel="attention">Attention</button>
                 <button class="tab-trigger" data-panel="path">Scanpath</button>
                 <button class="tab-trigger" data-panel="scroll">Scroll Depth</button>
+                {% if mouse_movement %}
+                <button class="tab-trigger" data-panel="mouse">Mouse Movement</button>
+                {% endif %}
                 <button class="tab-trigger" data-panel="report">Accessibility</button>
             </div>
             <div class="text-xs text-muted">
-                Press 1-5 to switch tabs
+                Press 1-6 to switch tabs
             </div>
         </div>
 
@@ -818,6 +821,30 @@
                     </div>
                 </div>
             </section>
+
+            {% if mouse_movement %}
+            <!-- Mouse Movement Panel -->
+            <section id="panel-mouse" class="panel">
+                <div class="grid grid-cols-2 gap-8" style="grid-template-columns: 2fr 1fr;">
+                    <div class="image-viewer">
+                        <img src="{{ mouse_movement }}" alt="Mouse Movement Visual">
+                    </div>
+                    <div class="flex flex-col gap-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Mouse Movement</h3>
+                            </div>
+                            <div class="card-content">
+                                <p class="text-sm text-muted mb-4">
+                                    Simulated cursor traces showing potential interaction paths based on UI element
+                                    saliency. This indicates expected user behavior across the page.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            {% endif %}
 
             <!-- Accessibility Report (Markdown) -->
             <section id="panel-report" class="panel">

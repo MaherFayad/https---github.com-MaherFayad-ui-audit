@@ -55,6 +55,9 @@ UEYES_ROOT = "models/Datasets/Ueyes"
 MASSVIS_ROOT = "models/Datasets/massvis"
 FIWI_ROOT = "models/Datasets/mobile ui salency"
 SALCHART_ROOT = "models/Datasets/SALchart QA"
+STONYBROOK_ROOT = "models/Datasets/stonybrook"
+ISUN_ROOT = "models/Datasets/isun-ood"
+MOUSE_ROOT = "models/Datasets/mouse_movement"
 MODEL_SAVE_PATH = "models/eml_net_hybrid.pth"
 
 # Device configuration
@@ -374,6 +377,9 @@ def main(args):
     m_root = MASSVIS_ROOT if args.dataset in ['all', 'massvis'] else None
     f_root = FIWI_ROOT if args.dataset in ['all', 'mobile'] else None
     sc_root = SALCHART_ROOT if args.dataset in ['all', 'salchart'] else None
+    sb_root = STONYBROOK_ROOT if args.dataset in ['all', 'stonybrook'] else None
+    isun_root = ISUN_ROOT if args.dataset in ['all', 'isun'] else None
+    mouse_root = MOUSE_ROOT if args.dataset in ['all', 'mouse'] else None
 
     train_dataset = HybridDataset(
         silicon_root=s_root,
@@ -381,6 +387,9 @@ def main(args):
         massvis_root=m_root,
         fiwi_root=f_root,
         salchart_root=sc_root,
+        stonybrook_root=sb_root,
+        isun_root=isun_root,
+        mouse_root=mouse_root,
         split='train'
     )
     
@@ -390,6 +399,9 @@ def main(args):
         massvis_root=m_root,
         fiwi_root=f_root,
         salchart_root=sc_root,
+        stonybrook_root=sb_root,
+        isun_root=isun_root,
+        mouse_root=mouse_root,
         split='val'
     )
     
@@ -543,7 +555,7 @@ if __name__ == "__main__":
     parser.add_argument('--dry-run', action='store_true', help="Run only 1 epoch for testing")
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE, help=f"Batch size (default: {BATCH_SIZE})")
     parser.add_argument('--dataset', type=str, default='all', 
-                        choices=['all', 'silicon', 'ueyes', 'massvis', 'mobile', 'salchart'], 
+                        choices=['all', 'silicon', 'ueyes', 'massvis', 'mobile', 'salchart', 'stonybrook', 'isun', 'mouse'], 
                         help="Specific dataset to train on")
     
     args = parser.parse_args()

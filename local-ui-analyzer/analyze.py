@@ -31,7 +31,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file")
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 
 # Initialize Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -603,6 +603,55 @@ def generate_eml_heatmap_mask(shape: tuple, boxes: list[dict]) -> np.ndarray:
         
     return combined_heatmap
 
+def generate_mouse_movement_map(image: np.ndarray, boxes: list[dict]) -> np.ndarray:
+    """
+    Generate a simulated mouse movement visual.
+    
+    Creates a path connecting the focal points of the UI elements,
+    simulating where a user's mouse might travel.
+    """
+    height, width = image.shape[:2]
+    result = image.copy()
+    
+    # Needs to be slightly dimmed to show the lines
+    overlay = np.zeros_like(result)
+    
+    if not boxes:
+        return result
+        
+    # Sort boxes mostly top to bottom to simulate natural reading/movement
+    sorted_boxes = sorted(boxes, key=lambda b: (b['y'] // 100, b['x']))
+    
+    points = []
+    for box in sorted_boxes:
+        cx = box['x'] + box['w'] // 2
+        cy = box['y'] + box['h'] // 2
+        points.append((cx, cy))
+        
+    # Draw paths
+    if len(points) > 1:
+        for i in range(len(points) - 1):
+            pt1 = points[i]
+            pt2 = points[i+1]
+            
+            # Draw connecting line
+            cv2.line(overlay, pt1, pt2, (0, 165, 255), 3, cv2.LINE_AA)
+            
+            # Draw circle at destination
+            cv2.circle(overlay, pt2, 8, (0, 165, 255), -1)
+            cv2.circle(overlay, pt2, 12, (255, 255, 255), 2)
+            
+        # Draw start point specially
+        cv2.circle(overlay, points[0], 10, (50, 205, 50), -1)
+        cv2.circle(overlay, points[0], 14, (255, 255, 255), 2)
+        
+    # Apply overlay
+    alpha = 0.6
+    mask = np.any(overlay > 0, axis=-1)
+    result[mask] = cv2.addWeighted(result, 1 - alpha, overlay, alpha, 0)[mask]
+    
+    return result
+
 
 def generate_center_bias_map(shape: tuple) -> np.ndarray:
     """
@@ -1158,9 +1207,9 @@ def generate_inhibition_kernel(shape: tuple, center: tuple, radius: int = 100) -
 def generate_deterministic_scanpath(saliency_map: np.ndarray, 
                                     num_fixations: int = 6,
                                     ior_radius: int = 100,
-                                    apply_reading_bias: bool = True,
                                     viewport_height: int = 900,
-                                    fixations_per_fold: int = 4) -> list[dict]:
+                                    fixations_per_fold: int = 4,
+                                    mouse_prior: np.ndarray = None) -> list[dict]:
     """
     Generate a deterministic scanpath using Progressive Viewport WTA with IOR.
     
@@ -1251,7 +1300,16 @@ def generate_deterministic_scanpath(saliency_map: np.ndarray,
             x_bias = np.power(1.0 - x_grid, 0.3)
             x_bias = 0.7 + 0.3 * (x_bias / x_bias.max())  # Normalize to [0.7, 1.0]
             
-            reading_prior = fold_y_bias * x_bias
+            if mouse_prior is not None:
+                # Add mouse movement bias to the reading prior
+                mouse_bias = mouse_prior[fold_start_y:fold_end_y, :]
+                
+                # If mouse_bias has values, apply it
+                if mouse_bias.max() > 0:
+                    mouse_bias = mouse_bias / mouse_bias.max() # Normalize
+                    # Blend the mouse bias and reading prior: giving mouse equal footing to reading
+                    reading_prior = (reading_prior * 0.5) + (mouse_bias * 0.5)
+            
             fold_map = fold_map * reading_prior
         
         # --- WTA Loop for This Fold ---
@@ -1707,6 +1765,29 @@ def run_analysis(image_path: str, output_dir: str = "output",
     attention_with_fold = draw_fold_line(attention_heatmap, fold_y, above_fold_analysis)
     aoi_with_fold = draw_fold_line(aoi_image, fold_y, above_fold_analysis)
     
+    # Step 8.75: Generate simulated mouse movement ONLY for websites
+    mouse_movement_image = None
+    mouse_movement_heatmap = None
+    mouse_movement_with_fold = None
+    if page_info is not None:
+        print("Generating mouse movement visualization (Website analysis detected)...")
+        mouse_movement_image = generate_mouse_movement_map(image.copy(), boxes)
+        mouse_movement_with_fold = draw_fold_line(mouse_movement_image, fold_y, above_fold_analysis)
+        
+        # Extract just the heatmap layer for the scanpath prior (it's the overlay in generate_mouse_movement_map)
+        mouse_movement_heatmap = np.zeros((height, width), dtype=np.float32)
+        if len(boxes) > 0:
+            sorted_boxes = sorted(boxes, key=lambda b: (b['y'] // 100, b['x']))
+            points = [(b['x'] + b['w'] // 2, b['y'] + b['h'] // 2) for b in sorted_boxes]
+            if len(points) > 1:
+                # Draw thick lines on the heatmap layer
+                for i in range(len(points) - 1):
+                    cv2.line(mouse_movement_heatmap, points[i], points[i+1], 1.0, 40, cv2.LINE_AA)
+                from scipy.ndimage import gaussian_filter
+                mouse_movement_heatmap = gaussian_filter(mouse_movement_heatmap, sigma=20)
+    else:
+        print("Skipping mouse movement visual (Local image detected)")
+    
     # Step 9: Generate scroll depth visualization
     print("Generating scroll depth visualization...")
     scroll_depth_image = generate_scroll_depth_visualization(image.copy(), scroll_analysis)
@@ -1729,7 +1810,8 @@ def run_analysis(image_path: str, output_dir: str = "output",
         ior_radius=min(width, height) // 12,  # Smaller IOR for dense fixations
         apply_reading_bias=True,
         viewport_height=viewport_height,  # Pass viewport for fold-by-fold processing
-        fixations_per_fold=4
+        fixations_per_fold=4,
+        mouse_prior=mouse_movement_heatmap
     )
     print(f"Generated {len(scanpath_fixations)} fixations via Progressive Viewport WTA")
     
@@ -1761,6 +1843,8 @@ def run_analysis(image_path: str, output_dir: str = "output",
     cv2.imwrite(os.path.join(output_dir, "scanpath.png"), scanpath_with_fold)
     cv2.imwrite(os.path.join(output_dir, "fold.png"), image_with_fold) # Fold view is just original with fold
     cv2.imwrite(os.path.join(output_dir, "scroll_depth.png"), scroll_depth_image)
+    if mouse_movement_with_fold is not None:
+        cv2.imwrite(os.path.join(output_dir, "mouse_movement.png"), mouse_movement_with_fold)
     
     # Convert images to base64 for HTML embedding
     def img_to_base64_data_uri(img: np.ndarray) -> str:
@@ -1776,6 +1860,7 @@ def run_analysis(image_path: str, output_dir: str = "output",
         'scanpath': img_to_base64_data_uri(scanpath_with_fold),
         'fold': img_to_base64_data_uri(image_with_fold),
         'scroll_depth': img_to_base64_data_uri(scroll_depth_image),
+        'mouse_movement': img_to_base64_data_uri(mouse_movement_with_fold) if mouse_movement_with_fold is not None else None,
         'focus_score': focus_score,
         'clarity_score': clarity_score,
         'above_fold_analysis': above_fold_analysis,
