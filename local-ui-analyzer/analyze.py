@@ -538,8 +538,8 @@ def generate_attention_heatmap(image: np.ndarray, boxes: list[dict],
         broad_layer = broad_layer / broad_layer.max()
     
     # --- Fusion: Composite the Layers ---
-    # 70% Sharp (UI Accuracy) + 30% Broad (Vision Context)
-    combined_heatmap = (sharp_layer * 0.7) + (broad_layer * 0.3)
+    # 30% Sharp (UI Accuracy) + 70% Broad (Vision Context)
+    combined_heatmap = (sharp_layer * 0.3) + (broad_layer * 0.7)
     
     # Normalize final fusion
     if combined_heatmap.max() > 0:
