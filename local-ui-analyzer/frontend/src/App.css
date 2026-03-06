@@ -13,10 +13,10 @@
   --border: #e9e9e7;
   --border-focus: #c2c2c0;
 
-  /* The Notion-esque Blue for active steps */
-  --primary: #5c7cfa;
-  --primary-hover: #4c6ee6;
-  --primary-glow: rgba(92, 124, 250, 0.2);
+  /* Grayscale Theme */
+  --primary: #111111;
+  --primary-hover: #222222;
+  --primary-glow: rgba(17, 17, 17, 0.1);
 
   --radius: 6px;
   --radius-lg: 12px;
@@ -153,9 +153,9 @@ body {
 }
 
 .stepper-item.completed .stepper-badge {
-  background: var(--text-main);
-  border-color: var(--text-main);
-  color: white;
+  background: var(--bg-surface);
+  border-color: var(--text-muted);
+  color: var(--text-main);
 }
 
 .stepper-label {
@@ -449,7 +449,7 @@ body {
 }
 
 .spinner {
-  color: var(--primary);
+  color: var(--text-muted);
   animation: spin 1.5s linear infinite;
   margin-bottom: 1.5rem;
 }
@@ -567,20 +567,21 @@ body {
   letter-spacing: -0.02em;
 }
 
+/* All stats use the same grayscale primary text */
 .text-green-600 {
-  color: #16a34a;
+  color: var(--text-main);
 }
 
 .text-amber-500 {
-  color: #f59e0b;
+  color: var(--text-main);
 }
 
 .text-blue-600 {
-  color: #2563eb;
+  color: var(--text-main);
 }
 
 .text-indigo-600 {
-  color: #4f46e5;
+  color: var(--text-main);
 }
 
 /* Tabs */

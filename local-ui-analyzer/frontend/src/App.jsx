@@ -95,12 +95,12 @@ function App() {
     mouse: results?.mouse_movement,
   }
 
-  // Calculate stats for the results dashboard
+  // Calculate stats for the results dashboard (Colored only for success/warning)
   const stats = results ? [
     { label: 'Focus Score', value: `${results.focus_score?.toFixed(1)}%`, color: results.focus_score >= 60 ? 'text-green-600' : 'text-amber-500' },
     { label: 'Clarity Score', value: `${results.clarity_score?.toFixed(1)}%`, color: results.clarity_score >= 60 ? 'text-green-600' : 'text-amber-500' },
-    { label: 'Elements Found', value: results.boxes?.length, color: 'text-blue-600' },
-    { label: 'Above Fold', value: `${results.above_fold_analysis?.above_fold_attention_pct?.toFixed(0)}%`, color: 'text-indigo-600' }
+    { label: 'Elements Found', value: results.boxes?.length, color: 'text-gray-800' },
+    { label: 'Above Fold', value: `${results.above_fold_analysis?.above_fold_attention_pct?.toFixed(0)}%`, color: 'text-gray-800' }
   ] : []
 
   return (
