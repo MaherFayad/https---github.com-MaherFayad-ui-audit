@@ -533,22 +533,19 @@ def generate_attention_heatmap(image: np.ndarray, boxes: list[dict],
     else:
         combined = box_boost
     
-    # ---- 99.5th percentile contrast stretch ----
-    # Only the absolute top 0.5% of pixels clip to max. This boosts
-    # the signal enough to be visible without flooding the image with red
-    # like the 95th percentile did.
-    p99 = np.percentile(combined, 99.5)
-    if p99 > 1e-6:
-        combined = np.clip(combined / p99, 0, 1)
+    # ---- 99.8th percentile contrast stretch ----
+    p_top = np.percentile(combined, 99.8)
+    if p_top > 1e-6:
+        combined = np.clip(combined / p_top, 0, 1)
     elif combined.max() > 0:
         combined /= combined.max()
     
-    # Floor removal (15th percentile)
-    floor = np.percentile(combined, 15)
+    # Floor removal (20th percentile)
+    floor = np.percentile(combined, 20)
     combined = np.clip((combined - floor) / max(1.0 - floor, 1e-6), 0, 1)
     
-    # Gamma 2.2: balanced — peaks are red/yellow, secondary areas green/teal
-    combined = np.power(combined, 2.2)
+    # Gamma 2.6: compress secondary hotspots further toward green/teal
+    combined = np.power(combined, 2.6)
     
     if combined.max() > 0:
         combined /= combined.max()
