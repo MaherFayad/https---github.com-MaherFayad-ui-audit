@@ -1263,6 +1263,10 @@ def generate_deterministic_scanpath(saliency_map: np.ndarray,
     fixations = []
     fixation_order = 0
     
+    # Initialize the "current" gaze position to top-center of the screen
+    current_x = width // 2
+    current_y = 0
+    
     print(f"  Progressive Viewport: {num_folds} folds, {fixations_per_fold} fixations/fold, IOR radius: {ior_radius}px")
     
     # --- Process Each Fold Sequentially (Top to Bottom) ---
@@ -1315,15 +1319,33 @@ def generate_deterministic_scanpath(saliency_map: np.ndarray,
         # --- WTA Loop for This Fold ---
         fold_fixations = 0
         while fold_fixations < fixations_per_fold and fixation_order < num_fixations:
-            # Find peak in current fold
-            max_val = fold_map.max()
+            
+            # --- Saccadic Amplitude Constraint (Distance Penalty) ---
+            # Creates a spatial decay function from the *current* gaze position
+            # Making long jumps exponentially less likely than short jumps
+            y_coords = np.arange(fold_start_y, fold_end_y)
+            x_coords = np.arange(width)
+            xx, yy = np.meshgrid(x_coords, y_coords)
+            
+            dist = np.sqrt((xx - current_x)**2 + (yy - current_y)**2)
+            penalty_sigma = min(width, height) / 1.5
+            distance_penalty = np.exp(-(dist**2) / (2 * penalty_sigma**2)).astype(np.float32)
+            
+            # Apply penalty just for selecting the next point
+            selection_map = fold_map * distance_penalty
+            
+            # Find peak in the penalized selection map
+            max_val = selection_map.max()
             
             if max_val < 0.01:  # Fold exhausted
                 break
             
             # Get coordinates of maximum
-            max_idx = np.unravel_index(np.argmax(fold_map), fold_map.shape)
+            max_idx = np.unravel_index(np.argmax(selection_map), selection_map.shape)
             peak_y, peak_x = int(max_idx[0]), int(max_idx[1])
+            
+            # Update current reading position
+            current_x, current_y = peak_x, peak_y
             
             # Calculate fixation duration (proportional to original intensity)
             original_intensity = original_map[peak_y, peak_x]
@@ -1711,10 +1733,20 @@ def run_analysis(image_path: str, output_dir: str = "output",
     else:
         print("  Warning: EML-NET failed. Will fallback to box-based heatmap.")
     
-    # Step 2: Get attention boxes from Gemini (Guided by EML-NET)
-    print("Analyzing attention points with Gemini (Guided by EML-NET)...")
-    boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8)
-    print(f"Found {len(boxes)} attention areas")
+    # Step 2: Get attention boxes from OmniParser V2
+    print("Extracting UI elements with Microsoft OmniParser V2...")
+    from utils.omniparser_wrapper import LocalOmniParser
+    try:
+        boxes = LocalOmniParser.get_instance().predict(image)
+    except Exception as e:
+        print(f"OmniParser failed: {e}. Falling back to Gemini Vision chunking...")
+        boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8)
+        
+    if not boxes:
+        print("OmniParser found 0 elements. Falling back to Gemini Vision chunking...")
+        boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8)
+        
+    print(f"Found {len(boxes)} UI elements")
     
     # Step 3: Generate attention heatmap and AOI image
     print("Generating attention heatmap...")
