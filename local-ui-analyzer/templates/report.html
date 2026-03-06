@@ -631,6 +631,30 @@
             background: var(--primary);
         }
 
+        /* Dropdown */
+        .dropdown-item {
+            display: block;
+            width: 100%;
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--foreground);
+            background: none;
+            border: none;
+            text-align: left;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.15s;
+        }
+
+        .dropdown-item:hover {
+            background: var(--accent);
+        }
+
+        .dropdown-item + .dropdown-item {
+            border-top: 1px solid var(--border);
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             .grid-cols-4 {
@@ -659,10 +683,25 @@
                     <p class="text-muted">{{ page_info.url if page_info.url else image_path }}</p>
                 </div>
                 <div class="flex gap-2">
-                    <button class="btn btn-outline" onclick="downloadImage('png')">
-                        Download PNG
-                    </button>
-                    <!-- <button class="btn btn-primary" onclick="window.print()">Print Report</button> -->
+                    <div class="dropdown" style="position: relative;">
+                        <button class="btn btn-outline" onclick="toggleDropdown('dl-images')">
+                            Download Images ▾
+                        </button>
+                        <div id="dl-images" class="dropdown-menu" style="display:none; position:absolute; right:0; top:110%; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); box-shadow:0 4px 12px rgba(0,0,0,0.1); z-index:50; min-width:180px;">
+                            <button class="dropdown-item" onclick="downloadImage('png')">Current Tab PNG</button>
+                            <button class="dropdown-item" onclick="downloadAllImages()">All Charts (ZIP)</button>
+                        </div>
+                    </div>
+                    <div class="dropdown" style="position: relative;">
+                        <button class="btn btn-primary" onclick="toggleDropdown('dl-report')">
+                            Export Report ▾
+                        </button>
+                        <div id="dl-report" class="dropdown-menu" style="display:none; position:absolute; right:0; top:110%; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); box-shadow:0 4px 12px rgba(0,0,0,0.1); z-index:50; min-width:180px;">
+                            <button class="dropdown-item" onclick="downloadReportAs('md')">Markdown (.md)</button>
+                            <button class="dropdown-item" onclick="downloadReportAs('html')">HTML (.html)</button>
+                            <button class="dropdown-item" onclick="downloadReportAs('pdf')">PDF (.pdf)</button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -682,8 +721,9 @@
                 <div class="card metric-card">
                     <span class="metric-label">Clarity Score</span>
                     <div>
-                        <span class="metric-value">
-                            {{ "%.0f"|format(68.5) }}% <!-- Placeholder if missing, using safe default or variable -->
+                        <span
+                            class="metric-value {% if clarity_score < 45 %}text-danger{% elif clarity_score < 60 %}text-warning{% endif %}">
+                            {{ "%.0f"|format(clarity_score) }}%
                         </span>
                         <span class="metric-target">Target: >60%</span>
                     </div>
@@ -692,10 +732,11 @@
                 <div class="card metric-card">
                     <span class="metric-label">Above Fold</span>
                     <div>
-                        <span class="metric-value">
+                        <span
+                            class="metric-value {% if device_type == 'mobile' %}{% if above_fold_analysis.above_fold_attention_pct < 4 %}text-danger{% elif above_fold_analysis.above_fold_attention_pct < 8 %}text-warning{% endif %}{% else %}{% if above_fold_analysis.above_fold_attention_pct < 8 %}text-danger{% elif above_fold_analysis.above_fold_attention_pct < 15 %}text-warning{% endif %}{% endif %}">
                             {{ "%.0f"|format(above_fold_analysis.above_fold_attention_pct) }}%
                         </span>
-                        <span class="metric-target">Target: >15%</span>
+                        <span class="metric-target">Target: >{% if device_type == 'mobile' %}8{% else %}15{% endif %}%</span>
                     </div>
                     <span class="metric-desc">Initial engagement</span>
                 </div>
@@ -719,8 +760,8 @@
                 {% endif %}
                 <button class="tab-trigger" data-panel="report">Accessibility</button>
             </div>
-            <div class="text-xs text-muted">
-                Press 1-6 to switch tabs
+            <div class="text-xs text-muted" id="tab-shortcut-hint">
+                Press 1-{% if mouse_movement %}6{% else %}5{% endif %} to switch tabs
             </div>
         </div>
 
@@ -903,13 +944,30 @@
                 });
             });
 
-            // Keyboard Shortcuts usually 1-indexed
+            // Keyboard shortcuts: dynamically build map from visible tabs
             document.addEventListener('keydown', (e) => {
-                const map = { '1': 'original', '2': 'attention', '3': 'path', '4': 'scroll', '5': 'report' };
-                if (map[e.key]) switchTab(map[e.key]);
+                const visibleTriggers = Array.from(triggers);
+                const idx = parseInt(e.key) - 1;
+                if (idx >= 0 && idx < visibleTriggers.length) {
+                    switchTab(visibleTriggers[idx].dataset.panel);
+                }
             });
 
-            // Image Downloader
+            // Dropdown toggle
+            window.toggleDropdown = function (id) {
+                const menu = document.getElementById(id);
+                const isOpen = menu.style.display !== 'none';
+                // Close all dropdowns first
+                document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+                menu.style.display = isOpen ? 'none' : 'block';
+            };
+            document.addEventListener('click', (e) => {
+                if (!e.target.closest('.dropdown')) {
+                    document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+                }
+            });
+
+            // Image Downloader (current tab)
             window.downloadImage = function (format) {
                 const activePanel = document.querySelector('.panel.active');
                 const img = activePanel.querySelector('img');
@@ -920,6 +978,50 @@
                 link.href = img.src;
                 link.click();
             };
+
+            // Download all images as individual files (no ZIP library needed)
+            window.downloadAllImages = function () {
+                const allImgs = document.querySelectorAll('.panel .image-viewer img');
+                allImgs.forEach((img, i) => {
+                    const panel = img.closest('.panel');
+                    const name = panel ? panel.id.replace('panel-', '') : `chart-${i}`;
+                    setTimeout(() => {
+                        const link = document.createElement('a');
+                        link.download = `analysis-${name}.png`;
+                        link.href = img.src;
+                        link.click();
+                    }, i * 300);
+                });
+            };
+
+            // Report export
+            window.downloadReportAs = function (format) {
+                const rawMd = document.getElementById('raw-markdown').textContent.trim();
+
+                if (format === 'md') {
+                    const blob = new Blob([rawMd], { type: 'text/markdown' });
+                    triggerDownload(blob, 'accessibility-report.md');
+                } else if (format === 'html') {
+                    const htmlContent = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Accessibility Report</title><style>body{font-family:Inter,system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 2rem;color:#1a1a1a;line-height:1.6}h1,h2,h3{margin-top:2em}table{width:100%;border-collapse:collapse;margin:1rem 0}th,td{padding:.75rem 1rem;border:1px solid #e5e5e5;text-align:left}th{background:#f5f5f5;font-weight:600}hr{border:none;border-top:1px solid #e5e5e5;margin:2rem 0}code{background:#f5f5f5;padding:.15rem .4rem;border-radius:4px;font-size:.9em}ul{padding-left:1.5rem}</style></head><body>${marked.parse(rawMd)}</body></html>`;
+                    const blob = new Blob([htmlContent], { type: 'text/html' });
+                    triggerDownload(blob, 'accessibility-report.html');
+                } else if (format === 'pdf') {
+                    // Use browser print to PDF
+                    const printWin = window.open('', '_blank');
+                    printWin.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Accessibility Report</title><style>body{font-family:Inter,system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 2rem;color:#1a1a1a;line-height:1.6}h1,h2,h3{margin-top:1.5em}table{width:100%;border-collapse:collapse;margin:1rem 0}th,td{padding:.5rem .75rem;border:1px solid #ddd;text-align:left}th{background:#f5f5f5;font-weight:600}ul{padding-left:1.5rem}@media print{body{margin:0}}</style></head><body>${marked.parse(rawMd)}</body></html>`);
+                    printWin.document.close();
+                    setTimeout(() => { printWin.print(); }, 500);
+                }
+            };
+
+            function triggerDownload(blob, filename) {
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                link.click();
+                URL.revokeObjectURL(url);
+            }
 
             // Dynamic TOC Generator
             function generateTOC() {

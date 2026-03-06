@@ -26,9 +26,14 @@ from dotenv import load_dotenv
 load_dotenv()
 from google import genai
 
-GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    print("WARNING: GEMINI_API_KEY not found in .env file. UX Overview will fail.")
+
 GEMINI_MODEL = "gemini-3.1-pro-preview"
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+gemini_client = None
+if GEMINI_API_KEY:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = Flask(__name__, static_folder='frontend/dist', static_url_path='')
 CORS(app)
@@ -190,62 +195,98 @@ def generate_ux_overview(results: dict, context: str, image_path: str) -> str:
     Takes the analysis results + user-provided context to give actionable UX advice.
     """
     try:
-        # Read image for Gemini
-        with open(image_path, 'rb') as f:
-            image_bytes = f.read()
+        # Smart Adaptive Slicing for Gemini Vision
+        from PIL import Image
+        import io
+        
+        full_img = Image.open(image_path)
+        original_width, original_height = full_img.size
+        
+        # 1. Standardize Width: 1280px is optimal for Gemini vision (HD)
+        # Higher widths (1920+) often trigger dimension errors on very long pages.
+        TARGET_WIDTH = 1280
+        scale_ratio = TARGET_WIDTH / float(original_width)
+        scaled_height = int(original_height * scale_ratio)
+        
+        print(f"  Gemini: Processing {original_width}x{original_height} page...")
+        print(f"  Gemini: Standardizing to {TARGET_WIDTH}px width (Total height: {scaled_height}px)")
+        
+        # Resize full image to standardized width
+        resized_full_img = full_img.resize((TARGET_WIDTH, scaled_height), Image.Resampling.LANCZOS)
+        
+        # 2. Slice into manageable Vision Chunks
+        # Limit to max 5 chunks to prevent request timeout/payload issues
+        MAX_CHUNKS = 5
+        CHUNK_HEIGHT = 1800 # ~1.5x viewport height
+        OVERLAP = 150
+        
+        # If the page is extremely long, we increase chunk height to keep count under MAX_CHUNKS
+        effective_chunk_height = max(CHUNK_HEIGHT, (scaled_height // MAX_CHUNKS) + 100)
+        
+        img_parts = []
+        y_start = 0
+        while y_start < scaled_height and len(img_parts) < MAX_CHUNKS:
+            y_end = min(y_start + effective_chunk_height, scaled_height)
+            
+            # Crop the chunk
+            chunk_img = resized_full_img.crop((0, y_start, TARGET_WIDTH, y_end))
+            
+            # Ensure RGB
+            if chunk_img.mode in ("RGBA", "P"):
+                chunk_img = chunk_img.convert("RGB")
+            
+            img_parts.append(chunk_img)
+            
+            if y_end == scaled_height:
+                break
+            y_start = y_end - OVERLAP
+
+        print(f"  Gemini: Sending {len(img_parts)} high-res chunks for analysis...")
         
         focus_score = results.get('focus_score', 0)
         clarity_score = results.get('clarity_score', 0)
         num_elements = len(results.get('boxes', []))
         above_fold = results.get('above_fold_analysis', {})
         
-        prompt = f"""You are an expert UX/UI analyst. Analyze this webpage screenshot and provide a comprehensive UX review.
+        prompt = f"""You are a Senior UX/UI Strategist. I am providing you with a **sequential scroll journey** of a single webpage.
+        
+### HOW TO ANALYZE THIS INPUT:
+- **Visual Sequence**: I have provided {len(img_parts)} images. Image 1 is the Hero/Landing (Top), and they proceed as you scroll down.
+- **Continuous Logic**: Treat this as a single continuous experience. Ignore the ~150px overlaps at the top/bottom of images; they are just seams.
+- **Goal**: Evaluate how effectively the page tells a story and leads the user to take action as they move through the sections.
 
-## Page Context (from the user)
-{context}
+### Page Metrics:
+- **Focus Score**: {focus_score:.1f}% (concentration on key elements)
+- **Visual Clarity**: {clarity_score:.1f}% (cleanliness vs clutter)
+- **Viewport Height**: {above_fold.get('fold_y', 'N/A')}px
+- **Context**: {context}
 
-## Automated Analysis Results
-- **Focus Score**: {focus_score:.1f}% (how well attention is concentrated on key elements)
-- **Clarity Score**: {clarity_score:.1f}% (visual cleanliness and lack of clutter)
-- **UI Elements Detected**: {num_elements}
-- **Above-the-Fold Attention**: {above_fold.get('above_fold_attention_pct', 0):.1f}%
-- **Elements Above Fold**: {above_fold.get('above_fold_box_count', 0)}
+### Your Task:
+Provide a comprehensive UX audit. Use this exact structure:
 
-## Your Task
-Provide a detailed UX review covering:
+## Executive Summary
+Summarize the page's design effectiveness and conversion potential in 3 sentences.
 
-### 1. First Impression & Visual Hierarchy
-- What grabs attention first? Is that the right element?
-- Is there a clear visual hierarchy guiding the user?
+## 1. Above the Fold (Slice #1)
+Analyze the value proposition and the immediate "Hero" impact. Is the CTA obvious?
 
-### 2. User Flow & Conversion Path
-- Is the primary CTA (Call-to-Action) clear and prominent?
-- Are there friction points in the user journey?
+## 2. Scroll Journey & Engagement
+How does the narrative evolve across Slices #2 to #{len(img_parts)}? Is there a "scent of information" pulling the user down?
 
-### 3. Content & Information Architecture
-- Is the content well-organized and scannable?
-- Are headings, labels, and microcopy effective?
+## 3. Visual Consistency & Brand Trust
+Does the design feel cohesive? Is typography and color used effectively?
 
-### 4. Mobile / Responsive Considerations
-- Would this layout work on smaller screens?
-- Are touch targets appropriately sized?
+## 4. Top 5 Actionable Recommendations
+List 5 specific, prioritized changes to improve conversion and UX.
 
-### 5. Top 5 Actionable Improvements
-- Provide specific, prioritized recommendations with expected impact.
+Format in clean markdown. Start directly with ## Executive Summary."""
 
-Format your response in clean markdown with headers. Be specific — reference actual UI elements you can see in the screenshot."""
-
-        # Call Gemini with the image
+        # Call Gemini using the GenAI SDK's native list support [text, img1, img2, ...]
+        contents = [prompt] + img_parts
+        
         response = gemini_client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode('utf-8')}}
-                    ]
-                }
-            ]
+            contents=contents
         )
         
         return response.text
