@@ -845,8 +845,11 @@ def calculate_focus_score(heatmap_mask: np.ndarray, boxes: list[dict],
     Higher score = attention concentrated on fewer elements.
     
     Key design decisions:
-    - Computed on VIEWPORT region only (not full page) to match AI methodology
-    - Uses Gini + top-percentile concentration + spatial compactness
+    - Computed on VIEWPORT region only (not full page)
+    - Strips the diffuse saliency floor (from hero bias blending) before computing
+      concentration — this is critical because the hero bias adds ~0.03-0.05 to every
+      pixel, artificially reducing the Gini coefficient
+    - Uses Gini (50%) + top-percentile concentration (30%) + spatial compactness (20%)
     - Device-specific calibration (mobile viewports naturally concentrate attention)
     
     Attention Insight reference points:
@@ -856,13 +859,20 @@ def calculate_focus_score(heatmap_mask: np.ndarray, boxes: list[dict],
     """
     height, width = image_shape[:2]
     
-    # Crop to viewport region — Attention Insight computes per-viewport, not full page
+    # Crop to viewport region — AI computes per-viewport, not full page
     if viewport_height and viewport_height < height:
         region = heatmap_mask[:viewport_height, :]
     else:
         region = heatmap_mask
     
     flat = region.flatten().astype(np.float64)
+    
+    # Strip the diffuse saliency floor before computing concentration.
+    # The hero bias blending adds a Gaussian baseline (~0.01-0.05) to every pixel,
+    # which makes background areas appear to have "some attention" when they don't.
+    # Removing the 60th percentile as noise floor isolates the true saliency peaks.
+    noise_floor = np.percentile(flat, 60)
+    flat = np.maximum(0.0, flat - noise_floor)
     total = flat.sum()
     n = len(flat)
     
@@ -871,27 +881,27 @@ def calculate_focus_score(heatmap_mask: np.ndarray, boxes: list[dict],
     
     sorted_vals = np.sort(flat)
     
-    # --- Component 1: Gini Coefficient (inequality of saliency distribution) ---
+    # --- Component 1: Gini Coefficient (50% weight) ---
+    # With noise floor removed, Gini properly reflects peak-vs-background inequality
     index = np.arange(1, n + 1)
     gini = (np.sum((2 * index - n - 1) * sorted_vals)) / (n * total)
     
-    # Calibrated mapping: viewport saliency Gini typically 0.45-0.92
     gini_score = float(np.interp(gini,
-        [0.30, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95],
-        [10,   25,   42,   60,   78,   92,   100]))
+        [0.30, 0.50, 0.60, 0.70, 0.80, 0.90, 0.97],
+        [10,   28,   45,   65,   82,   94,   100]))
     
-    # --- Component 2: Top-percentile concentration ---
-    # What fraction of total saliency is held by the brightest 5% of pixels?
+    # --- Component 2: Top-percentile concentration (30% weight) ---
     top_5_count = max(1, int(n * 0.05))
     top_5_ratio = float(sorted_vals[-top_5_count:].sum() / total)
     
     conc_score = float(np.interp(top_5_ratio,
-        [0.15, 0.30, 0.45, 0.60, 0.75, 0.90],
-        [10,   30,   50,   70,   88,   100]))
+        [0.20, 0.35, 0.50, 0.65, 0.80, 0.95],
+        [10,   30,   52,   72,   90,   100]))
     
-    # --- Component 3: Spatial compactness of hotspots ---
+    # --- Component 3: Spatial compactness of hotspots (20% weight) ---
+    # Measures how tightly clustered the attention peaks are
     threshold = np.percentile(flat, 90)
-    hot_coords = np.where(region > threshold)
+    hot_coords = np.where(region > (noise_floor + threshold))
     
     if len(hot_coords[0]) > 10:
         y_std = np.std(hot_coords[0]) / region.shape[0]
@@ -903,11 +913,11 @@ def calculate_focus_score(heatmap_mask: np.ndarray, boxes: list[dict],
     spatial_score = compactness * 100
     
     # --- Weighted blend ---
-    focus = (gini_score * 0.40) + (conc_score * 0.35) + (spatial_score * 0.25)
+    focus = (gini_score * 0.50) + (conc_score * 0.30) + (spatial_score * 0.20)
     
     # Device calibration: narrow viewports naturally concentrate attention
     if device_type == 'mobile':
-        focus = min(100, focus * 1.15)
+        focus = min(100, focus * 1.12)
     elif device_type == 'tablet':
         focus = min(100, focus * 1.05)
     
@@ -922,14 +932,17 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
     Measures visual complexity and scannability of the above-fold viewport.
     Higher score = cleaner, easier to scan. Lower = more cluttered.
     
-    Methodology:
-    1. Element Coverage (40%): pixel area covered by UI elements / viewport area
-    2. Element Count Density (30%): device-aware box count per viewport
-    3. Visual Complexity (30%): edge density + color variance in viewport
+    Methodology (4 components):
+    1. Element Coverage (15%): pixel area covered by UI elements / viewport area
+    2. Element Count Density (15%): meaningful-element count per viewport (device-aware)
+    3. Visual Complexity (25%): edge density + color/hue/saturation variance
+    4. Luminance Uniformity (45%): how uniform the background luminance is —
+       gradient/image backgrounds score LOW, plain backgrounds score HIGH.
+       This is the primary differentiator for dark-themed or image-heavy pages.
     
     Attention Insight reference points:
-    - Mobile cluttered page: ~37 ("Moderate Difficulty")
-    - Desktop moderate page: ~54 ("Moderate Difficulty")
+    - Linear mobile (dark gradient): ~37 ("Moderate Difficulty")
+    - Ramp desktop (light, busy hero): ~54 ("Moderate Difficulty")
     - Clean minimal page: ~70+
     """
     height, width = image.shape[:2]
@@ -938,64 +951,60 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
         viewport_height = min(height, {'mobile': 667, 'tablet': 1024, 'desktop': 900}.get(device_type, 900))
     
     vp_h = min(viewport_height, height)
-    viewport_area = vp_h * width
     viewport_img = image[:vp_h, :]
+    gray = cv2.cvtColor(viewport_img, cv2.COLOR_BGR2GRAY)
     
-    # --- Component 1: Element Coverage (40%) ---
-    # Use OmniParser boxes to compute actual UI element pixel coverage in viewport
+    # --- Filter boxes to viewport and meaningful size ---
     all_boxes = boxes or []
     viewport_boxes = [b for b in all_boxes if b['y'] < vp_h]
+    # OmniParser can detect 300-700+ tiny elements (individual text spans, icons, dots).
+    # Filter to "meaningful" UI elements for counting: min 15x15 on mobile, 20x20 on desktop.
+    min_dim = 15 if device_type == 'mobile' else 20
+    meaningful_boxes = [b for b in viewport_boxes 
+                        if b['w'] >= min_dim and b['h'] >= min_dim]
     
-    if viewport_boxes and viewport_area > 0:
+    # --- Component 1: Element Coverage (15%) ---
+    if viewport_boxes:
         coverage_mask = np.zeros((vp_h, width), dtype=np.uint8)
         for b in viewport_boxes:
-            x1 = max(0, b['x'])
-            y1 = max(0, b['y'])
+            x1, y1 = max(0, b['x']), max(0, b['y'])
             x2 = min(width, b['x'] + b['w'])
             y2 = min(vp_h, b['y'] + b['h'])
             if x2 > x1 and y2 > y1:
                 coverage_mask[y1:y2, x1:x2] = 1
-        
         coverage_ratio = float(np.sum(coverage_mask)) / coverage_mask.size
     else:
         coverage_ratio = 0.5
     
-    # High coverage = cluttered → low score
     coverage_score = float(np.interp(coverage_ratio,
         [0.15, 0.30, 0.45, 0.60, 0.75, 0.90],
         [95,   75,   55,   38,   20,   5]))
     
-    # --- Component 2: Element Count Density (30%) ---
-    num_vp_boxes = len(viewport_boxes)
+    # --- Component 2: Element Count Density (15%) ---
+    num_meaningful = len(meaningful_boxes)
     
-    # Device-aware thresholds: same element count is more cluttered on mobile
     if device_type == 'mobile':
-        count_score = float(np.interp(num_vp_boxes,
+        count_score = float(np.interp(num_meaningful,
             [3,  10,  20,  35,  55,  80],
             [95, 78,  55,  35,  18,  5]))
     elif device_type == 'tablet':
-        count_score = float(np.interp(num_vp_boxes,
+        count_score = float(np.interp(num_meaningful,
             [5,  18,  35,  55,  80,  120],
             [95, 78,  55,  35,  18,  5]))
     else:
-        count_score = float(np.interp(num_vp_boxes,
+        count_score = float(np.interp(num_meaningful,
             [8,  25,  50,  80,  120, 180],
             [95, 78,  55,  35,  18,  5]))
     
-    # --- Component 3: Visual Complexity (30%) ---
-    gray = cv2.cvtColor(viewport_img, cv2.COLOR_BGR2GRAY)
-    
-    # Edge density
+    # --- Component 3: Visual Complexity (25%) ---
     edges = cv2.Canny(gray, 50, 150)
     edge_density = float(np.sum(edges > 0)) / edges.size
     
-    # Color complexity
     hsv = cv2.cvtColor(viewport_img, cv2.COLOR_BGR2HSV)
     saturation_mean = float(np.mean(hsv[:, :, 1])) / 255.0
     value_variance = float(np.std(hsv[:, :, 2])) / 255.0
     hue_variance = float(np.std(hsv[:, :, 0])) / 180.0
     
-    # Weighted visual complexity metric
     visual_complexity = (edge_density * 0.40 +
                         saturation_mean * 0.20 +
                         value_variance * 0.20 +
@@ -1005,8 +1014,24 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
         [0.02, 0.04, 0.07, 0.10, 0.14, 0.20],
         [92,   75,   55,   38,   22,   5]))
     
+    # --- Component 4: Luminance Uniformity (45%) ---
+    # This captures what element-based metrics miss: gradient backgrounds,
+    # image-heavy hero sections, and dark themes with glow effects all create
+    # perceptual processing difficulty even when element count is low.
+    # A heavy Gaussian blur removes text/small elements, leaving only the
+    # large-scale luminance structure (background gradients, images, sections).
+    blurred = cv2.GaussianBlur(gray, (51, 51), 0)
+    luminance_std = float(np.std(blurred)) / 255.0
+    
+    uniformity_score = float(np.interp(luminance_std,
+        [0.04, 0.08, 0.14, 0.22, 0.30, 0.40],
+        [95,   80,   62,   42,   25,   8]))
+    
     # --- Composite ---
-    clarity = (coverage_score * 0.40) + (count_score * 0.30) + (complexity_score * 0.30)
+    clarity = (coverage_score * 0.15 +
+               count_score * 0.15 +
+               complexity_score * 0.25 +
+               uniformity_score * 0.45)
     
     return float(max(5.0, min(99.0, round(clarity, 1))))
 
