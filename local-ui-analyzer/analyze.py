@@ -510,7 +510,7 @@ def generate_attention_heatmap(image: np.ndarray, boxes: list[dict],
     
     # ---- Primary signal: EML-NET saliency ----
     if saliency_map is not None:
-        saliency_layer = gaussian_filter(saliency_map.astype(np.float32), sigma=60)
+        saliency_layer = gaussian_filter(saliency_map.astype(np.float32), sigma=30)
     else:
         saliency_layer = np.zeros((height, width), dtype=np.float32)
     
@@ -529,25 +529,26 @@ def generate_attention_heatmap(image: np.ndarray, boxes: list[dict],
     
     # ---- Combine: saliency drives, boxes amplify ----
     if saliency_layer.max() > 0:
-        combined = saliency_layer * (1.0 + box_boost * 0.4)
+        combined = saliency_layer * (1.0 + box_boost * 0.2)
     else:
         combined = box_boost
     
-    # ---- Percentile contrast stretch ----
-    # Map the 98th percentile to 1.0 so faintly warm areas become clearly
-    # visible instead of being crushed near zero.
-    p98 = np.percentile(combined, 98)
-    if p98 > 1e-6:
-        combined = np.clip(combined / p98, 0, 1)
+    # ---- 99.5th percentile contrast stretch ----
+    # Only the absolute top 0.5% of pixels clip to max. This boosts
+    # the signal enough to be visible without flooding the image with red
+    # like the 95th percentile did.
+    p99 = np.percentile(combined, 99.5)
+    if p99 > 1e-6:
+        combined = np.clip(combined / p99, 0, 1)
     elif combined.max() > 0:
         combined /= combined.max()
     
-    # Subtle floor removal (10th percentile) to clean up ambient noise
-    floor = np.percentile(combined, 10)
+    # Floor removal (15th percentile)
+    floor = np.percentile(combined, 15)
     combined = np.clip((combined - floor) / max(1.0 - floor, 1e-6), 0, 1)
     
-    # Gamma 2.0: peaks pop red/yellow, mid-tones stay green/teal
-    combined = np.power(combined, 2.0)
+    # Gamma 2.2: balanced — peaks are red/yellow, secondary areas green/teal
+    combined = np.power(combined, 2.2)
     
     if combined.max() > 0:
         combined /= combined.max()
