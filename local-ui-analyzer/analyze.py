@@ -346,15 +346,16 @@ def merge_chunk_boxes(all_boxes: list[dict], iou_threshold: float = 0.5) -> list
     return merged
 
 
-def get_attention_boxes(image: np.ndarray, saliency_map: np.ndarray = None, use_chunking: bool = True) -> list[dict]:
+def get_attention_boxes(image: np.ndarray, saliency_map: np.ndarray = None, use_chunking: bool = True, chunk_size: tuple = (640, 480)) -> list[dict]:
     """
-    Query Ollama to identify eye-catching UI elements.
+    Query Ollama or Gemini to identify eye-catching UI elements.
     Uses chunking strategy for better results with small VLMs.
     
     Args:
         image: Input image
         saliency_map: Optional EML-NET heatmap to guide detection
         use_chunking: If True, split image into chunks first
+        chunk_size: (width, height) for tiling
         
     Returns:
         List of bounding boxes [x, y, w, h, label]
@@ -362,12 +363,12 @@ def get_attention_boxes(image: np.ndarray, saliency_map: np.ndarray = None, use_
     height, width = image.shape[:2]
     
     # For small images, don't chunk
-    if not use_chunking or (width <= 1920 and height <= 4000):
+    if not use_chunking or (width <= chunk_size[0] and height <= chunk_size[1]):
         return _get_attention_boxes_single(image)
     
     # Chunk the image for better accuracy
-    print(f"  Chunking image ({width}x{height})...")
-    chunks = chunk_image(image, saliency_map=saliency_map, chunk_size=(1921, 4000), overlap=0.1)
+    print(f"  Chunking image ({width}x{height}) into {chunk_size[0]}x{chunk_size[1]} blocks...")
+    chunks = chunk_image(image, saliency_map=saliency_map, chunk_size=chunk_size, overlap=0.1)
     print(f"  Created {len(chunks)} chunks")
     
     # Analyze each chunk with rate limiting
@@ -495,40 +496,66 @@ def get_saliency_map(image: np.ndarray, boxes: list[dict]) -> np.ndarray:
 def generate_attention_heatmap(image: np.ndarray, boxes: list[dict], 
                               saliency_map: np.ndarray = None) -> np.ndarray:
     """
-    Generate a Gaussian-blurred heatmap overlay based on attention boxes.
-    Returns the image with heatmap overlay.
+    Generate a 'Retina-Clear' Dual-Layer Heatmap.
     
-    Uses heavy blur to create soft, blobby attention pools similar to 
-    Attention Insight's visualization style.
+    Logic:
+    1. Layer A (Sharp UI): Heatmap built from OmniParser boxes with tight blur (Sigma ~15)
+       to snap attention perfectly to UI elements.
+    2. Layer B (Broad Context): EML-NET global saliency with moderate blur (Sigma ~60).
+    3. Fusion: Combine with weighted bias (70% Sharp, 30% Broad) for precision + context.
     """
     height, width = image.shape[:2]
     
-    # EML-NET Principle: Multi-Layer Fusion (Object + Context)
-    if saliency_map is None:
-        combined_heatmap = generate_eml_heatmap_mask((height, width), boxes)
+    # --- Layer A: Sharp UI Precision ---
+    # Create a sharp mask from boxes
+    sharp_mask = np.zeros((height, width), dtype=np.float32)
+    for box in boxes:
+        x, y, w, h = box['x'], box['y'], box['w'], box['h']
+        # Weights boxes by their relative 'importance' if EML-NET is available
+        weight = 1.0
+        if saliency_map is not None:
+            roi = saliency_map[max(0,y):min(height,y+h), max(0,x):min(width,x+w)]
+            weight = float(np.mean(roi)) if roi.size > 0 else 0.5
+            
+        # Draw the box intensity
+        sharp_mask[max(0,y):min(height,y+h), max(0,x):min(width,x+w)] += weight
+        
+    # Apply a slightly softer blur to Layer A (increased from 15 to 25 per user request)
+    sharp_layer = gaussian_filter(sharp_mask, sigma=25)
+    if sharp_layer.max() > 0:
+        sharp_layer = sharp_layer / sharp_layer.max()
+
+    # --- Layer B: Broad Context ---
+    if saliency_map is not None:
+        broad_layer = saliency_map.copy()
     else:
-        combined_heatmap = saliency_map.copy()
+        # Fallback broad mask
+        broad_layer = gaussian_filter(sharp_mask, sigma=60)
+        
+    # Apply moderate blur to Layer B for environmental context
+    broad_layer = gaussian_filter(broad_layer, sigma=60)
+    if broad_layer.max() > 0:
+        broad_layer = broad_layer / broad_layer.max()
     
-    # --- Soften the Heatmap (Attention Insight Style) ---
-    # Apply heavy Gaussian blur for soft, blobby attention pools
-    # Sigma scales with image size for consistent softness
-    blur_sigma = max(40, min(width, height) // 20)  # ~60-80px for 1920px width
-    combined_heatmap = gaussian_filter(combined_heatmap, sigma=blur_sigma)
+    # --- Fusion: Composite the Layers ---
+    # 70% Sharp (UI Accuracy) + 30% Broad (Vision Context)
+    combined_heatmap = (sharp_layer * 0.7) + (broad_layer * 0.3)
     
-    # Normalize after blur
+    # Normalize final fusion
     if combined_heatmap.max() > 0:
         combined_heatmap = combined_heatmap / combined_heatmap.max()
     
-    # Apply non-linear curve for better hot/cold distinction (push mid-values down)
-    combined_heatmap = np.power(combined_heatmap, 1.5)
+    # --- Visual Polish ---
+    # Non-linear curve (gamma) to make hot spots pop and cold areas clean
+    combined_heatmap = np.power(combined_heatmap, 2.0)
     
-    # Apply colormap (jet: blue=cold, red=hot)
+    # Apply colormap (jet)
     heatmap_colored = cm.jet(combined_heatmap)[:, :, :3]
     heatmap_colored = (heatmap_colored * 255).astype(np.uint8)
     heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_RGB2BGR)
     
     # Blend with original image
-    alpha = 0.55  # Slightly less opacity for cleaner look
+    alpha = 0.50  # Balanced transparency
     result = cv2.addWeighted(image, 1 - alpha, heatmap_colored, alpha, 0)
     
     return result
@@ -603,27 +630,51 @@ def generate_eml_heatmap_mask(shape: tuple, boxes: list[dict]) -> np.ndarray:
         
     return combined_heatmap
 
-def generate_mouse_movement_map(image: np.ndarray, boxes: list[dict]) -> np.ndarray:
+def generate_mouse_movement_map(image: np.ndarray, boxes: list[dict], saliency_map: np.ndarray = None) -> np.ndarray:
     """
     Generate a simulated mouse movement visual.
     
-    Creates a path connecting the focal points of the UI elements,
-    simulating where a user's mouse might travel.
+    Refined logic:
+    1. Assign a 'saliency score' to each box based on EML-NET heatmap intensity.
+    2. Filter for only the top N most salient boxes to avoid 'busy' traces.
+    3. Connect these strategic points in reading order.
     """
     height, width = image.shape[:2]
     result = image.copy()
-    
-    # Needs to be slightly dimmed to show the lines
     overlay = np.zeros_like(result)
     
     if not boxes:
         return result
         
-    # Sort boxes mostly top to bottom to simulate natural reading/movement
-    sorted_boxes = sorted(boxes, key=lambda b: (b['y'] // 100, b['x']))
+    # Step 1: Score boxes by saliency
+    scored_boxes = []
+    for box in boxes:
+        x, y, w, h = box['x'], box['y'], box['w'], box['h']
+        # Ensure coordinates are within bounds
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(width, x + w), min(height, y + h)
+        
+        if saliency_map is not None:
+            # Average saliency within the box
+            box_roi = saliency_map[y1:y2, x1:x2]
+            score = float(np.mean(box_roi)) if box_roi.size > 0 else 0.0
+        else:
+            # Fallback to simple size-based importance
+            score = (w * h) / (width * height)
+            
+        scored_boxes.append({**box, 'saliency_score': score})
+    
+    # Step 2: Select Top N most significant elements (e.g., top 25)
+    # This prevents the mouse from visiting every tiny icon or decorative element.
+    top_n = min(25, len(scored_boxes))
+    significant_boxes = sorted(scored_boxes, key=lambda b: b['saliency_score'], reverse=True)[:top_n]
+    
+    # Step 3: Sort the significant elements by reading order (Top-to-Bottom, Left-to-Right)
+    # We use a 200px band to group elements into lines
+    path_boxes = sorted(significant_boxes, key=lambda b: (b['y'] // 200, b['x']))
     
     points = []
-    for box in sorted_boxes:
+    for box in path_boxes:
         cx = box['x'] + box['w'] // 2
         cy = box['y'] + box['h'] // 2
         points.append((cx, cy))
@@ -634,16 +685,16 @@ def generate_mouse_movement_map(image: np.ndarray, boxes: list[dict]) -> np.ndar
             pt1 = points[i]
             pt2 = points[i+1]
             
-            # Draw connecting line
-            cv2.line(overlay, pt1, pt2, (0, 165, 255), 3, cv2.LINE_AA)
+            # Draw connecting line with subtle curve or thickness
+            cv2.line(overlay, pt1, pt2, (0, 165, 255), 4, cv2.LINE_AA)
             
-            # Draw circle at destination
-            cv2.circle(overlay, pt2, 8, (0, 165, 255), -1)
-            cv2.circle(overlay, pt2, 12, (255, 255, 255), 2)
+            # Draw circle at destination (cursor representation)
+            cv2.circle(overlay, pt2, 8, (0, 165, 255), -1, cv2.LINE_AA)
+            cv2.circle(overlay, pt2, 12, (255, 255, 255), 2, cv2.LINE_AA)
             
-        # Draw start point specially
-        cv2.circle(overlay, points[0], 10, (50, 205, 50), -1)
-        cv2.circle(overlay, points[0], 14, (255, 255, 255), 2)
+        # Draw start point specially (green)
+        cv2.circle(overlay, points[0], 10, (50, 205, 50), -1, cv2.LINE_AA)
+        cv2.circle(overlay, points[0], 14, (255, 255, 255), 2, cv2.LINE_AA)
         
     # Apply overlay
     alpha = 0.6
@@ -876,7 +927,8 @@ def generate_accessibility_report(image: np.ndarray,
                                 clarity_score: float = 0,
                                 above_fold: dict = None,
                                 scroll_analysis: dict = None,
-                                scan_path_sequence: list = None) -> str:
+                                scan_path_sequence: list = None,
+                                device_type: str = 'desktop') -> str:
     """
     WCAG 2.2 Accessibility Audit with Metric-Driven Analysis.
     
@@ -997,6 +1049,8 @@ def generate_accessibility_report(image: np.ndarray,
     metrics_context = f"""
     QUANTITATIVE DATA (Attention Analysis Engine):
     ═══════════════════════════════════════════════
+    • Device Type: {device_type.upper()}
+    • Viewport Height (The Fold): {above_fold.get('fold_y', 'N/A') if above_fold else 'N/A'}px
     • Focus Score (Gini Coeff): {focus_score:.1f}% 
       → Measures attention concentration. <50% = scattered, >70% = focused
     • Clarity Score (Laplacian Var): {clarity_score:.1f}%
@@ -1017,7 +1071,8 @@ def generate_accessibility_report(image: np.ndarray,
 You are a Senior WCAG 2.2 Accessibility Auditor and UX Strategist.
 
 ### CONTEXT
-You are auditing a UI based on raw screenshots and new quantitative data provided below.
+You are auditing a {device_type.upper()} UI based on raw screenshots and quantitative data provided below.
+IMPORTANT: For {device_type}, content below the {above_fold.get('fold_y', 'N/A') if above_fold else 'N/A'}px fold line is NOT visible to the user without scrolling.
 
 {metrics_context}
 
@@ -1121,6 +1176,12 @@ def analyze_above_fold(image: np.ndarray, boxes: list[dict],
     else:
         above_fold_pct = 50.0
         below_fold_pct = 50.0
+        
+    return {
+        'above_fold_attention_pct': float(round(above_fold_pct, 1)),
+        'below_fold_attention_pct': float(round(below_fold_pct, 1)),
+        'fold_y': fold_y
+    }
     
     # Count boxes above/below fold
     boxes_above = sum(1 for b in boxes if b['y'] + b['h'] / 2 < fold_y)
@@ -1207,6 +1268,7 @@ def generate_inhibition_kernel(shape: tuple, center: tuple, radius: int = 100) -
 def generate_deterministic_scanpath(saliency_map: np.ndarray, 
                                     num_fixations: int = 6,
                                     ior_radius: int = 100,
+                                    apply_reading_bias: bool = True,
                                     viewport_height: int = 900,
                                     fixations_per_fold: int = 4,
                                     mouse_prior: np.ndarray = None) -> list[dict]:
@@ -1304,16 +1366,21 @@ def generate_deterministic_scanpath(saliency_map: np.ndarray,
             x_bias = np.power(1.0 - x_grid, 0.3)
             x_bias = 0.7 + 0.3 * (x_bias / x_bias.max())  # Normalize to [0.7, 1.0]
             
+            # Combine into a single reading prior
+            reading_prior = fold_y_bias * x_bias
+            
             if mouse_prior is not None:
-                # Add mouse movement bias to the reading prior
-                mouse_bias = mouse_prior[fold_start_y:fold_end_y, :]
+                # Add mouse movement bias to the reading prior (full image shape)
+                mouse_bias = mouse_prior.copy()
                 
                 # If mouse_bias has values, apply it
                 if mouse_bias.max() > 0:
                     mouse_bias = mouse_bias / mouse_bias.max() # Normalize
+                    print(f"DEBUG shapes | reading_prior: {reading_prior.shape}, mouse_bias: {mouse_bias.shape}")
                     # Blend the mouse bias and reading prior: giving mouse equal footing to reading
                     reading_prior = (reading_prior * 0.5) + (mouse_bias * 0.5)
             
+            print(f"DEBUG shapes | fold_map: {fold_map.shape}, reading_prior: {reading_prior.shape}")
             fold_map = fold_map * reading_prior
         
         # --- WTA Loop for This Fold ---
@@ -1323,12 +1390,12 @@ def generate_deterministic_scanpath(saliency_map: np.ndarray,
             # --- Saccadic Amplitude Constraint (Distance Penalty) ---
             # Creates a spatial decay function from the *current* gaze position
             # Making long jumps exponentially less likely than short jumps
-            y_coords = np.arange(fold_start_y, fold_end_y)
+            y_coords = np.arange(height)
             x_coords = np.arange(width)
             xx, yy = np.meshgrid(x_coords, y_coords)
             
             dist = np.sqrt((xx - current_x)**2 + (yy - current_y)**2)
-            penalty_sigma = min(width, height) / 1.5
+            penalty_sigma = min(width, viewport_height) / 1.5
             distance_penalty = np.exp(-(dist**2) / (2 * penalty_sigma**2)).astype(np.float32)
             
             # Apply penalty just for selecting the next point
@@ -1733,18 +1800,17 @@ def run_analysis(image_path: str, output_dir: str = "output",
     else:
         print("  Warning: EML-NET failed. Will fallback to box-based heatmap.")
     
-    # Step 2: Get attention boxes from OmniParser V2
     print("Extracting UI elements with Microsoft OmniParser V2...")
     from utils.omniparser_wrapper import LocalOmniParser
     try:
         boxes = LocalOmniParser.get_instance().predict(image)
     except Exception as e:
         print(f"OmniParser failed: {e}. Falling back to Gemini Vision chunking...")
-        boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8)
+        boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8, chunk_size=(640, 480))
         
     if not boxes:
         print("OmniParser found 0 elements. Falling back to Gemini Vision chunking...")
-        boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8)
+        boxes = get_attention_boxes(image, saliency_map=saliency_map_uint8, chunk_size=(640, 480))
         
     print(f"Found {len(boxes)} UI elements")
     
@@ -1797,26 +1863,38 @@ def run_analysis(image_path: str, output_dir: str = "output",
     attention_with_fold = draw_fold_line(attention_heatmap, fold_y, above_fold_analysis)
     aoi_with_fold = draw_fold_line(aoi_image, fold_y, above_fold_analysis)
     
-    # Step 8.75: Generate simulated mouse movement ONLY for websites
+    # Step 8.75: Generate simulated mouse movement ONLY for DESKTOP websites
     mouse_movement_image = None
     mouse_movement_heatmap = None
     mouse_movement_with_fold = None
-    if page_info is not None:
-        print("Generating mouse movement visualization (Website analysis detected)...")
-        mouse_movement_image = generate_mouse_movement_map(image.copy(), boxes)
+    if page_info is not None and device_type == 'desktop':
+        print("Generating mouse movement visualization (Desktop website detected)...")
+        # Use refined saliency-weighted logic
+        mouse_movement_image = generate_mouse_movement_map(image.copy(), boxes, saliency_map=attention_mask)
         mouse_movement_with_fold = draw_fold_line(mouse_movement_image, fold_y, above_fold_analysis)
         
-        # Extract just the heatmap layer for the scanpath prior (it's the overlay in generate_mouse_movement_map)
+        # Extract just the heatmap layer for the scanpath prior
+        # We RE-FILTER here to get the same 'significant' points used in the visual map
         mouse_movement_heatmap = np.zeros((height, width), dtype=np.float32)
         if len(boxes) > 0:
-            sorted_boxes = sorted(boxes, key=lambda b: (b['y'] // 100, b['x']))
-            points = [(b['x'] + b['w'] // 2, b['y'] + b['h'] // 2) for b in sorted_boxes]
+            # Score and selection (mirroring logic inside generate_mouse_movement_map)
+            scored = []
+            for b in boxes:
+                x1, y1, x2, y2 = b['x'], b['y'], b['x']+b['w'], b['y']+b['h']
+                roi = attention_mask[max(0,y1):min(height,y2), max(0,x1):min(width,x2)]
+                s = float(np.mean(roi)) if roi.size > 0 else 0.0
+                scored.append({**b, 's': s})
+            
+            top_n = min(25, len(scored))
+            sig = sorted(scored, key=lambda x: x['s'], reverse=True)[:top_n]
+            sig_sorted = sorted(sig, key=lambda x: (x['y'] // 200, x['x']))
+            
+            points = [(b['x'] + b['w'] // 2, b['y'] + b['h'] // 2) for b in sig_sorted]
             if len(points) > 1:
-                # Draw thick lines on the heatmap layer
                 for i in range(len(points) - 1):
-                    cv2.line(mouse_movement_heatmap, points[i], points[i+1], 1.0, 40, cv2.LINE_AA)
+                    cv2.line(mouse_movement_heatmap, points[i], points[i+1], 1.0, 60, cv2.LINE_AA)
                 from scipy.ndimage import gaussian_filter
-                mouse_movement_heatmap = gaussian_filter(mouse_movement_heatmap, sigma=20)
+                mouse_movement_heatmap = gaussian_filter(mouse_movement_heatmap, sigma=30)
     else:
         print("Skipping mouse movement visual (Local image detected)")
     
@@ -1862,7 +1940,8 @@ def run_analysis(image_path: str, output_dir: str = "output",
         clarity_score=clarity_score,
         above_fold=above_fold_analysis,
         scroll_analysis=scroll_analysis,
-        scan_path_sequence=scanpath_boxes  # Pass deterministic scanpath
+        scan_path_sequence=scanpath_boxes,  # Pass deterministic scanpath
+        device_type=device_type
     )
     
     # Save images
