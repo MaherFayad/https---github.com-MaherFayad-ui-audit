@@ -149,6 +149,7 @@ GEMINI_API_KEY=your_google_gemini_api_key_here
 ```
 
 The Gemini API key is used for:
+
 - AI-generated accessibility audit reports
 - UX overview analysis (when page context is provided)
 
@@ -176,10 +177,11 @@ This compiles the React app into `frontend/dist/`, which Flask serves as static 
 Start the Flask server:
 
 ```bash
-python server.py
+venv\Scripts\python.exe server.p
 ```
 
-Open **http://localhost:5000** in your browser. From there you can:
+Open **<http://localhost:5000>** in your browser. From there you can:
+
 - Paste a URL or upload a screenshot
 - Choose device type (mobile / tablet / desktop)
 - Provide optional page context for AI-powered UX overview
