@@ -496,66 +496,79 @@ def get_saliency_map(image: np.ndarray, boxes: list[dict], viewport_height: int 
 def generate_attention_heatmap(image: np.ndarray, boxes: list[dict], 
                               saliency_map: np.ndarray = None) -> np.ndarray:
     """
-    Generate a 'Retina-Clear' Dual-Layer Heatmap.
+    Generate a high-contrast attention heatmap with concentrated hotspots.
     
-    Logic:
-    1. Layer A (Sharp UI): Heatmap built from OmniParser boxes with tight blur (Sigma ~15)
-       to snap attention perfectly to UI elements.
-    2. Layer B (Broad Context): EML-NET global saliency with moderate blur (Sigma ~60).
-    3. Fusion: Combine with weighted bias (70% Sharp, 30% Broad) for precision + context.
+    Produces visually "violent" peaks (bright red/yellow) on high-attention
+    regions and dark/transparent cold zones between them, matching the style
+    of professional eye-tracking tools like Attention Insight.
+    
+    Layers:
+    1. Sharp UI (sigma 15): tight Gaussian blobs from OmniParser boxes,
+       weighted by EML-NET saliency so only salient elements glow.
+    2. Broad Context (sigma 30): lightly smoothed EML-NET saliency for
+       environmental glow around high-attention zones.
+    3. Fusion: 55% sharp + 45% broad.
+    4. Floor removal + aggressive gamma to kill the diffuse wash and
+       make peaks pop hard.
     """
     height, width = image.shape[:2]
     
     # --- Layer A: Sharp UI Precision ---
-    # Create a sharp mask from boxes
     sharp_mask = np.zeros((height, width), dtype=np.float32)
     for box in boxes:
-        x, y, w, h = box['x'], box['y'], box['w'], box['h']
-        # Weights boxes by their relative 'importance' if EML-NET is available
+        bx, by, bw, bh = box['x'], box['y'], box['w'], box['h']
         weight = 1.0
         if saliency_map is not None:
-            roi = saliency_map[max(0,y):min(height,y+h), max(0,x):min(width,x+w)]
-            weight = float(np.mean(roi)) if roi.size > 0 else 0.5
+            roi = saliency_map[max(0,by):min(height,by+bh), max(0,bx):min(width,bx+bw)]
+            if roi.size > 0:
+                weight = float(np.mean(roi))
+                weight = weight ** 0.6  # compress dynamic range so mid-saliency boxes still contribute
+            else:
+                weight = 0.3
             
-        # Draw the box intensity
-        sharp_mask[max(0,y):min(height,y+h), max(0,x):min(width,x+w)] += weight
+        sharp_mask[max(0,by):min(height,by+bh), max(0,bx):min(width,bx+bw)] += weight
         
-    # Apply a slightly softer blur to Layer A (increased from 15 to 25 per user request)
-    sharp_layer = gaussian_filter(sharp_mask, sigma=25)
+    sharp_layer = gaussian_filter(sharp_mask, sigma=15)
     if sharp_layer.max() > 0:
-        sharp_layer = sharp_layer / sharp_layer.max()
+        sharp_layer /= sharp_layer.max()
 
     # --- Layer B: Broad Context ---
     if saliency_map is not None:
         broad_layer = saliency_map.copy()
     else:
-        # Fallback broad mask
-        broad_layer = gaussian_filter(sharp_mask, sigma=60)
+        broad_layer = gaussian_filter(sharp_mask, sigma=40)
         
-    # Apply moderate blur to Layer B for environmental context
-    broad_layer = gaussian_filter(broad_layer, sigma=60)
+    broad_layer = gaussian_filter(broad_layer, sigma=30)
     if broad_layer.max() > 0:
-        broad_layer = broad_layer / broad_layer.max()
+        broad_layer /= broad_layer.max()
     
-    # --- Fusion: Composite the Layers ---
-    # 30% Sharp (UI Accuracy) + 70% Broad (Vision Context)
-    combined_heatmap = (sharp_layer * 0.3) + (broad_layer * 0.7)
+    # --- Fusion ---
+    combined_heatmap = (sharp_layer * 0.55) + (broad_layer * 0.45)
     
-    # Normalize final fusion
     if combined_heatmap.max() > 0:
-        combined_heatmap = combined_heatmap / combined_heatmap.max()
+        combined_heatmap /= combined_heatmap.max()
     
-    # --- Visual Polish ---
-    # Non-linear curve (gamma) to make hot spots pop and cold areas clean
-    combined_heatmap = np.power(combined_heatmap, 2.0)
+    # --- Kill the diffuse wash ---
+    # Remove the noise floor so low-attention areas are truly cold/dark.
+    # The 40th percentile threshold eliminates the ambient glow from
+    # hero bias blending and over-smoothed saliency tails.
+    floor = np.percentile(combined_heatmap, 40)
+    combined_heatmap = np.clip((combined_heatmap - floor) / max(1.0 - floor, 1e-6), 0, 1)
+    
+    # Aggressive gamma: crush mid-tones, only true peaks survive as hot
+    combined_heatmap = np.power(combined_heatmap, 3.0)
+    
+    # Re-normalize after gamma so the hottest spot reaches 1.0
+    if combined_heatmap.max() > 0:
+        combined_heatmap /= combined_heatmap.max()
     
     # Apply colormap (jet)
     heatmap_colored = cm.jet(combined_heatmap)[:, :, :3]
     heatmap_colored = (heatmap_colored * 255).astype(np.uint8)
     heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_RGB2BGR)
     
-    # Blend with original image
-    alpha = 0.50  # Balanced transparency
+    # Blend: higher alpha to make the heatmap more vivid against the image
+    alpha = 0.55
     result = cv2.addWeighted(image, 1 - alpha, heatmap_colored, alpha, 0)
     
     return result
@@ -929,21 +942,17 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
                             viewport_height: int = None) -> float:
     """
     Calculate Clarity/Clutter Score (0-100) calibrated against Attention Insight.
-    Measures visual complexity and scannability of the above-fold viewport.
     Higher score = cleaner, easier to scan. Lower = more cluttered.
     
-    Methodology (4 components):
-    1. Element Coverage (15%): pixel area covered by UI elements / viewport area
-    2. Element Count Density (15%): meaningful-element count per viewport (device-aware)
-    3. Visual Complexity (25%): edge density + color/hue/saturation variance
-    4. Luminance Uniformity (45%): how uniform the background luminance is —
-       gradient/image backgrounds score LOW, plain backgrounds score HIGH.
-       This is the primary differentiator for dark-themed or image-heavy pages.
+    Uses a harmonic-weighted blend of structural (element-based) and perceptual
+    (image-based) metrics. The harmonic mean naturally penalizes any single
+    severely-low component, matching how humans perceive clutter: one bad
+    dimension (e.g. gradient overload OR element congestion) tanks the score.
     
     Attention Insight reference points:
-    - Linear mobile (dark gradient): ~37 ("Moderate Difficulty")
-    - Ramp desktop (light, busy hero): ~54 ("Moderate Difficulty")
-    - Clean minimal page: ~70+
+    - Linear mobile (dark gradient hero): ~37
+    - Ramp desktop (product screenshots, busy hero): ~54
+    - Clean minimal landing page: ~70+
     """
     height, width = image.shape[:2]
     
@@ -957,13 +966,13 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
     # --- Filter boxes to viewport and meaningful size ---
     all_boxes = boxes or []
     viewport_boxes = [b for b in all_boxes if b['y'] < vp_h]
-    # OmniParser can detect 300-700+ tiny elements (individual text spans, icons, dots).
-    # Filter to "meaningful" UI elements for counting: min 15x15 on mobile, 20x20 on desktop.
     min_dim = 15 if device_type == 'mobile' else 20
     meaningful_boxes = [b for b in viewport_boxes 
                         if b['w'] >= min_dim and b['h'] >= min_dim]
     
-    # --- Component 1: Element Coverage (15%) ---
+    # ================================================================
+    # Component 1: Element Coverage (weight: 0.20)
+    # ================================================================
     if viewport_boxes:
         coverage_mask = np.zeros((vp_h, width), dtype=np.uint8)
         for b in viewport_boxes:
@@ -974,29 +983,37 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
                 coverage_mask[y1:y2, x1:x2] = 1
         coverage_ratio = float(np.sum(coverage_mask)) / coverage_mask.size
     else:
-        coverage_ratio = 0.5
+        coverage_ratio = 0.3
     
     coverage_score = float(np.interp(coverage_ratio,
-        [0.15, 0.30, 0.45, 0.60, 0.75, 0.90],
-        [95,   75,   55,   38,   20,   5]))
+        [0.15, 0.35, 0.55, 0.72, 0.85, 0.95],
+        [95,   78,   60,   45,   28,   10]))
     
-    # --- Component 2: Element Count Density (15%) ---
+    # ================================================================
+    # Component 2: Element Count Density (weight: 0.15)
+    # OmniParser over-detects (elements inside product screenshots, etc.),
+    # so thresholds are generous — 80-120 elements is normal for a complex
+    # desktop page.
+    # ================================================================
     num_meaningful = len(meaningful_boxes)
     
     if device_type == 'mobile':
         count_score = float(np.interp(num_meaningful,
-            [3,  10,  20,  35,  55,  80],
-            [95, 78,  55,  35,  18,  5]))
+            [5,  15,  30,  50,  80,  130],
+            [95, 78,  58,  40,  22,  5]))
     elif device_type == 'tablet':
         count_score = float(np.interp(num_meaningful,
-            [5,  18,  35,  55,  80,  120],
-            [95, 78,  55,  35,  18,  5]))
+            [8,  25,  50,  80,  130, 200],
+            [95, 78,  58,  40,  22,  5]))
     else:
         count_score = float(np.interp(num_meaningful,
-            [8,  25,  50,  80,  120, 180],
-            [95, 78,  55,  35,  18,  5]))
+            [15,  40,  80,  140, 220, 350],
+            [95,  78,  58,  40,  22,  5]))
     
-    # --- Component 3: Visual Complexity (25%) ---
+    # ================================================================
+    # Component 3: Visual Complexity (weight: 0.35)
+    # Edge density + color channel variance
+    # ================================================================
     edges = cv2.Canny(gray, 50, 150)
     edge_density = float(np.sum(edges > 0)) / edges.size
     
@@ -1011,27 +1028,30 @@ def calculate_clarity_score(image: np.ndarray, boxes: list[dict] = None,
                         hue_variance * 0.20)
     
     complexity_score = float(np.interp(visual_complexity,
-        [0.02, 0.04, 0.07, 0.10, 0.14, 0.20],
-        [92,   75,   55,   38,   22,   5]))
+        [0.02, 0.05, 0.08, 0.12, 0.17, 0.24],
+        [95,   78,   60,   42,   25,   8]))
     
-    # --- Component 4: Luminance Uniformity (45%) ---
-    # This captures what element-based metrics miss: gradient backgrounds,
-    # image-heavy hero sections, and dark themes with glow effects all create
-    # perceptual processing difficulty even when element count is low.
-    # A heavy Gaussian blur removes text/small elements, leaving only the
-    # large-scale luminance structure (background gradients, images, sections).
-    blurred = cv2.GaussianBlur(gray, (51, 51), 0)
+    # ================================================================
+    # Component 4: Luminance Uniformity (weight: 0.30)
+    # 101-kernel blur removes text/elements, leaving only macro structure.
+    # Shifted right so normal hero-to-content color transitions (dark nav
+    # + light body) are tolerated; only full-viewport gradients, image-heavy
+    # backgrounds, or dark-themed pages with glow effects score LOW.
+    # ================================================================
+    blurred = cv2.GaussianBlur(gray, (101, 101), 0)
     luminance_std = float(np.std(blurred)) / 255.0
     
     uniformity_score = float(np.interp(luminance_std,
-        [0.04, 0.08, 0.14, 0.22, 0.30, 0.40],
-        [95,   80,   62,   42,   25,   8]))
+        [0.05, 0.12, 0.20, 0.28, 0.36, 0.46],
+        [95,   82,   65,   48,   30,   10]))
     
-    # --- Composite ---
-    clarity = (coverage_score * 0.15 +
-               count_score * 0.15 +
-               complexity_score * 0.25 +
-               uniformity_score * 0.45)
+    # ================================================================
+    # Composite: weighted average
+    # ================================================================
+    clarity = (coverage_score  * 0.20 +
+               count_score     * 0.15 +
+               complexity_score * 0.35 +
+               uniformity_score * 0.30)
     
     return float(max(5.0, min(99.0, round(clarity, 1))))
 

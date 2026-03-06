@@ -757,7 +757,6 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   min-height: 500px;
-  overflow: hidden;
   box-shadow: var(--shadow-md);
 }
 
@@ -783,7 +782,7 @@ body {
   gap: 2rem;
 }
 
-/* TOC Sidebar */
+/* TOC Sidebar — must stretch to content height so .toc-sticky has room to scroll */
 .report-toc {
   width: 220px;
   flex-shrink: 0;
