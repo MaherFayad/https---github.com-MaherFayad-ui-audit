@@ -510,7 +510,7 @@ def generate_attention_heatmap(image: np.ndarray, boxes: list[dict],
     
     # ---- Primary signal: EML-NET saliency ----
     if saliency_map is not None:
-        saliency_layer = gaussian_filter(saliency_map.astype(np.float32), sigma=20)
+        saliency_layer = gaussian_filter(saliency_map.astype(np.float32), sigma=60)
     else:
         saliency_layer = np.zeros((height, width), dtype=np.float32)
     
